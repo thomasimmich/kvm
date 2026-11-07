@@ -1,0 +1,152 @@
+# KVM computer-using agent (`cua/`)
+
+This service turns the JetKVM into an agent that operates the connected computer by itself.
+On each step it:
+
+1. **Sees** the screen. It fetches the current video frame from the KVM and parses it into UI
+   elements with **OmniParser v2**: YOLO icon detection, OCR, and Florence-2 icon captions.
+2. **Decides** what to do with **TypeSafe Jev**, a decision-only model. Jev picks the next element to
+   click, a scroll direction, an input to type, Escape, *done* or *stuck*. In the same call, Jev also
+   judges whether the previous action helped.
+3. **Acts** like a person would, using the KVM's USB HID emulation:
+   - the pointer moves on a curved, eased path, then clicks;
+   - the wheel scrolls up, down, left or right;
+   - typing goes through the remote machine's keyboard layout.
+4. **Checks** the result. If nothing changed, it marks that element as tried. If the action led
+   somewhere unhelpful, it presses Escape and tries a different element.
+
+```
+LeanScope agent server ──MCP──▶ cua serve (this service) ──HTTP──▶ JetKVM /api/cua ──USB HID──▶ remote PC
+```
+
+The device only provides "eyes and hands" (frames in, HID events out). Everything intelligent runs
+here: on a Mac today, and later in the cloud next to the agent server.
+
+## Quick start (after the setup below)
+
+From `cua/`, in two terminals:
+
+```bash
+npm run deploy   # starts the x86 build VM if needed, deploys the firmware to KVM_URL from cua/.env
+npm run cua      # starts the CUA (MCP + dashboard) and opens the dashboard
+```
+
+The debug firmware runs only while `npm run deploy` runs. Use `npm run deploy -- -i` to
+install it permanently.
+
+## Setup
+
+**1. Firmware.** Build and deploy this repository's firmware, which includes the new `/api/cua`
+endpoints:
+
+```bash
+./dev_deploy.sh -r <device-ip>
+```
+
+**2. Enable the API on the device and get a token.** Open the JetKVM web UI, open the browser
+console, and run:
+
+```js
+window.__kvmTestHooks.sendJsonRpc("setCuaApiConfig", { enabled: true, regenerateToken: true }, (r) => console.log(r))
+// → { result: { enabled: true, token: "…" } }
+```
+
+You can call `getCuaApiConfig` later to read the token again. Setting `enabled: false` turns the API
+off.
+
+**3. Install and configure this service.**
+
+```bash
+cd cua
+uv sync --extra omniparser          # PyTorch, ultralytics, transformers, OCR
+cp .env.example .env                # set KVM_URL, KVM_TOKEN, KVM_KEYBOARD_LAYOUT, TYPESAFE_API_KEY
+```
+
+The OmniParser weights (about 1 GB) download into `weights/` on first use. Without
+`TYPESAFE_API_KEY`, a simple keyword matcher stands in for Jev. That is good for wiring tests,
+not for real tasks.
+
+## Try it
+
+```bash
+uv run cua state                                   # resolution, codec, viewers
+uv run cua observe --save shot.png                 # parse the screen; writes shot.annotated.png
+uv run cua click "Settings"                        # one human-like click on a label
+uv run cua scroll down --notches 5
+uv run cua type "hello world" && uv run cua press enter
+uv run cua run "Open System Settings and show the Wi-Fi page" \
+    --hint "Settings is the gear icon in the Dock" --expect "Wi-Fi"
+uv run cua serve                                   # MCP at :8765/mcp, dashboard at :8765/dashboard
+```
+
+The **dashboard** (`http://127.0.0.1:8765/dashboard`) shows:
+- the latest screen, with numbered element boxes;
+- each decision, with Jev's top alternatives and their probabilities;
+- the result of the last run.
+
+You can also start goals from it. Keep the normal JetKVM browser view open next to it: the agent
+doesn't take over the WebRTC session.
+
+**Without a device:** use `--fake` to replay screenshots. The next image appears after each
+click, scroll or key press.
+
+```bash
+uv run cua --fake screens/ serve        # or: --fake a.png --fake b.png
+```
+
+**Traces:** every run is saved to `runs/<time>-<goal>/`:
+- each screen, as a raw and an annotated image;
+- the element lists;
+- `decisions.jsonl`, with Jev's probabilities;
+- `result.json`.
+
+A trace's screens and element files can be fed back into `FakeKvm` and `FixtureParser` as
+regression fixtures.
+
+## MCP surface
+
+The server speaks Streamable HTTP at `/mcp` and takes a bearer token from `CUA_MCP_TOKEN`.
+**Every tool returns plain text**, because the agent server flattens tool results to text.
+
+| Tool | Purpose |
+|---|---|
+| `cua_run_goal(goal, hints?, inputs?, expect_text?, max_steps=15, time_budget_s=100)` | The main tool. Runs the whole see → decide → act → verify loop and returns a step-by-step summary. |
+| `cua_observe()` | Lists the current elements as `[id] kind 'label' at position (x,y) WxH`. |
+| `cua_click_element(id, button?, double?)` | Clicks one element by its id from the last observation. |
+| `cua_click_text(text)` | Clicks one element by the text it contains. |
+| `cua_scroll(direction, notches?)` | Scrolls up, down, left or right. |
+| `cua_type_text(text)` | Types text. |
+| `cua_press_keys("ctrl+l")` | Presses a key or key combination. |
+
+The server also offers the prompt **`additional_agent_instructions`**, which carries the CUA
+background knowledge from `knowledge/additional_agent_instructions.md`. The agent server adds it to
+the step prompt automatically.
+
+See [docs/agent-server-integration.md](docs/agent-server-integration.md) for connecting a choreo.
+
+## Performance (M3 Pro, 1920×1280 screen)
+
+| Stage | Time |
+|---|---|
+| YOLO icon detection | 0.1 s |
+| Apple Vision OCR | 0.5 s |
+| Florence-2 captions | about 0.2 s per *new* icon (cached by content, so repeated toolbars and taskbars are free) |
+| Typical screen | 0.4–8 s, depending on how many unseen icons it has |
+| Model loading | about 10 s, done once on first use |
+
+## Code map
+
+| Path | What it does |
+|---|---|
+| `kvm/device.py` | `KvmDevice` interface; `HttpKvm` for the real device; `FakeKvm` for replays and tests |
+| `kvm/decode.py` | Decodes the device's GOP with PyAV, keeping the last picture |
+| `kvm/actuation.py` | Human-like mouse paths, clicks, scrolling and typing |
+| `kvm/keymap.py` | Text and key combos to HID codes, using `data/keymaps.json`, which is generated from `ui/src/keyboardLayouts` by `scripts/export_keymaps.sh` |
+| `perception/parser.py` | OmniParser v2 (also `ocr`-only and `null` parsers) |
+| `perception/screen.py` | Change detection and new-element detection |
+| `decision/jev.py`, `decision/decider.py` | Jev client (a port of the agent server's) and the option/state building |
+| `agent/loop.py` | The loop, including discard/undo, scroll bookkeeping and the time budget |
+| `mcp_server.py` | MCP tools, the prompt, the dashboard routes and bearer auth |
+
+Tests: `uv run pytest`. On the firmware side: `go test ./internal/cuaapi/`, which runs on any host.
+`cua_api_test.go` runs on the device with `./dev_deploy.sh -r <ip> --run-go-tests`.

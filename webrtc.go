@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jetkvm/kvm/internal/cuaapi"
 	"github.com/jetkvm/kvm/internal/diagnostics"
 	"github.com/jetkvm/kvm/internal/hidrpc"
 	"github.com/jetkvm/kvm/internal/logging"
@@ -696,8 +697,33 @@ func startNativeVideoLocked(session *Session) {
 	if videoPausedBy != nil {
 		return
 	}
-	_ = nativeInstance.VideoSetCodecType(sessionVideoCodecType(session))
+	startNativeVideoWithCodecLocked(sessionVideoCodecType(session))
+}
+
+// nativeVideoCodec is the codec the running pipeline was started with, or -1
+// while it is stopped. The CUA API can keep the pipeline running without a
+// session, so a session that connects later may need a different codec.
+// Guarded by videoPauseMu.
+var nativeVideoCodec = -1
+
+// startNativeVideoWithCodecLocked starts (or keeps) the pipeline with codec.
+// The codec cannot change mid-stream, so a running pipeline with another codec
+// is restarted. The caller holds videoPauseMu.
+func startNativeVideoWithCodecLocked(codec int) {
+	if nativeVideoCodec >= 0 && nativeVideoCodec != codec {
+		_ = nativeInstance.VideoStop()
+	}
+	cuaFrames.SetCodec(cuaapi.Codec(codec))
+	_ = nativeInstance.VideoSetCodecType(codec)
 	_ = nativeInstance.VideoStart()
+	nativeVideoCodec = codec
+}
+
+// stopNativeVideoLocked stops the pipeline. The caller holds videoPauseMu.
+func stopNativeVideoLocked() error {
+	nativeVideoCodec = -1
+	cuaFrames.Reset()
+	return nativeInstance.VideoStop()
 }
 
 // stopNativeVideo stops the pipeline under the pause lock so it cannot
@@ -705,7 +731,7 @@ func startNativeVideoLocked(session *Session) {
 func stopNativeVideo() {
 	videoPauseMu.Lock()
 	defer videoPauseMu.Unlock()
-	_ = nativeInstance.VideoStop()
+	_ = stopNativeVideoLocked()
 }
 
 // releaseVideoPause drops a pause held by a closing session and restarts video
@@ -717,6 +743,7 @@ func releaseVideoPause(session *Session) {
 		return
 	}
 	videoPausedBy = nil
+	videoPauseHidden = false
 	if currentSession != nil && currentSession != session {
 		startNativeVideoLocked(currentSession)
 	}
@@ -742,6 +769,11 @@ func onSessionConnected(session *Session) {
 func onLastSessionDisconnected() {
 	// Safety net: ensure all keys are released when the last session disconnects
 	_ = rpcKeyboardReport(0, keyboardClearStateKeys)
+	// A CUA client still polling frames keeps the pipeline and the host display
+	// alive; its lease expiry runs the same teardown later.
+	if cuaVideoLease.Active() {
+		return
+	}
 	// The closing session already released its own audio capture. A replacement
 	// may have connected since the zero-session decision, so do not stop its audio.
 	stopNativeVideo()

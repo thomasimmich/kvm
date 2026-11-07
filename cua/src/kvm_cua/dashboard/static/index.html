@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KVM CUA Dashboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #2563eb; --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --chip: #eef2ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1218; --panel: #171b23; --text: #e6e9ef; --muted: #98a2b3; --line: #2a303b;
+            --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --chip: #1e2533; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--chip); color: var(--muted); }
+  .pill.run { color: var(--warn); } .pill.done { color: var(--ok); } .pill.err { color: var(--bad); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; padding: 12px 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  #shot { width: 100%; height: auto; display: block; border-radius: 4px; background: #000; min-height: 120px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, textarea { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 54px; resize: vertical; }
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font: inherit; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .log { max-height: 420px; overflow: auto; font-size: 13px; }
+  .ev { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .ev .t { color: var(--muted); font-size: 11px; margin-right: 6px; }
+  .bar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+  .bar span.b { display: inline-block; height: 5px; background: var(--accent); border-radius: 3px; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; margin: 0; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>KVM computer-using agent</h1>
+  <span id="status" class="pill">idle</span>
+  <span id="decider" class="pill"></span>
+</header>
+<main>
+  <section>
+    <h2>Remote screen</h2>
+    <img id="shot" alt="Latest parsed screen with numbered element boxes">
+    <div class="meta" id="screenMeta">no screen yet: press Observe</div>
+  </section>
+  <div style="display:grid; gap:12px; align-content:start; min-width:0">
+    <section>
+      <h2>Goal</h2>
+      <label for="goal">Goal</label>
+      <input id="goal" placeholder="e.g. Open System Settings and show the Wi-Fi page">
+      <label for="hints">Hints (one per line)</label>
+      <textarea id="hints" placeholder="Settings is the gear icon in the dock"></textarea>
+      <label for="inputs">Inputs (name=value per line)</label>
+      <textarea id="inputs" placeholder="search=Wi-Fi"></textarea>
+      <label for="expect">Done when this text is visible (optional)</label>
+      <input id="expect">
+      <div class="row">
+        <button class="primary" id="run">Run goal</button>
+        <button id="observe">Observe</button>
+        <button id="cancel">Cancel</button>
+      </div>
+    </section>
+    <section>
+      <h2>Decisions</h2>
+      <div class="log" id="log"></div>
+    </section>
+    <section>
+      <h2>Last result</h2>
+      <pre id="result">—</pre>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let lastSeq = -1, lastHighlight = null;
+
+function lines(v) { return v.split("\n").map(s => s.trim()).filter(Boolean); }
+function inputs(v) {
+  const o = {};
+  for (const l of lines(v)) { const i = l.indexOf("="); if (i > 0) o[l.slice(0, i).trim()] = l.slice(i + 1); }
+  return o;
+}
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) alert(j.error || ("HTTP " + r.status));
+}
+$("run").onclick = () => post("/dashboard/api/run", {
+  goal: $("goal").value, hints: lines($("hints").value), inputs: inputs($("inputs").value), expectText: $("expect").value,
+});
+$("observe").onclick = () => post("/dashboard/api/observe");
+$("cancel").onclick = () => post("/dashboard/api/cancel");
+
+function renderEvents(events) {
+  const log = $("log");
+  const items = events.filter(e => ["decision", "run_start", "run_end"].includes(e.type)).slice(-40).reverse();
+  log.innerHTML = "";
+  for (const e of items) {
+    const d = document.createElement("div"); d.className = "ev";
+    const t = new Date(e.ts * 1000).toLocaleTimeString();
+    let html = `<span class="t">${t}</span>`;
+    if (e.type === "run_start") html += `<b>start</b> ${escapeHtml(e.goal)}`;
+    else if (e.type === "run_end") html += `<b>${escapeHtml(e.status)}</b> ${escapeHtml(e.message || "")}`;
+    else {
+      html += escapeHtml(e.action) + (e.confidence != null ? ` <span class="t">(${(e.confidence * 100).toFixed(0)}%)</span>` : "");
+      for (const [k, p] of Object.entries(e.alternatives || {})) {
+        html += `<div class="bar"><span class="b" style="width:${Math.max(2, p * 120)}px"></span>${escapeHtml(k)} ${(p * 100).toFixed(0)}%</div>`;
+      }
+    }
+    d.innerHTML = html; log.appendChild(d);
+  }
+}
+function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+async function tick() {
+  try {
+    const s = await (await fetch("/dashboard/api/state")).json();
+    const st = $("status");
+    const res = s.lastResult;
+    st.textContent = s.running ? "running: " + (s.goal || "") : res ? res.status : "idle";
+    st.className = "pill " + (s.running ? "run" : res && res.status === "done" ? "done" : res && res.status === "error" ? "err" : "");
+    $("decider").textContent = "decider: " + s.decider;
+    if (s.screen && (s.screen.seq !== lastSeq || s.highlight !== lastHighlight)) {
+      lastSeq = s.screen.seq; lastHighlight = s.highlight;
+      $("shot").src = "/dashboard/api/screen.jpg?" + Date.now();
+      $("screenMeta").textContent = `${s.screen.size[0]}×${s.screen.size[1]} · ${s.screen.elements.length} elements · parse ${s.screen.parseMs} ms · seq ${s.screen.seq}`;
+    }
+    renderEvents(s.events || []);
+    if (res) $("result").textContent = `${res.status}: ${res.message}\n` + (res.steps || []).map(x => `${x.step}. ${x.action} → ${x.outcome}`).join("\n");
+    $("run").disabled = s.running;
+  } catch (e) { /* server restarting */ }
+  setTimeout(tick, 1000);
+}
+tick();
+</script>
+</body>
+</html>

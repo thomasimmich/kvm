@@ -450,22 +450,32 @@ func reportLocalVersionAndCapabilities(session *Session) {
 // for example while its virtual media dialog is open, so a device that cannot
 // encode video and serve an upload at the same time keeps the pipeline down.
 // Only that session can resume; its disconnect releases the pause.
+//
+// reason "hidden" means only that the browser tab is in the background. A CUA
+// client still needs the screen then, so while its lease is active the pipeline
+// keeps running and the pause takes effect when the lease expires.
 var (
-	videoPauseMu  sync.Mutex
-	videoPausedBy *Session
+	videoPauseMu     sync.Mutex
+	videoPausedBy    *Session
+	videoPauseHidden bool
 )
 
-func rpcSetVideoStreamPaused(session *Session, paused bool) error {
+func rpcSetVideoStreamPaused(session *Session, paused bool, reason string) error {
 	videoPauseMu.Lock()
 	defer videoPauseMu.Unlock()
 	if paused {
 		videoPausedBy = session
-		return nativeInstance.VideoStop()
+		videoPauseHidden = reason == "hidden"
+		if videoPauseHidden && cuaVideoLease.Active() {
+			return nil
+		}
+		return stopNativeVideoLocked()
 	}
 	if videoPausedBy != nil && videoPausedBy != session {
 		return nil
 	}
 	videoPausedBy = nil
+	videoPauseHidden = false
 	// The resuming session may already have been replaced; video restarts for
 	// the session that is current now, with its codec.
 	if currentSession != nil {
@@ -1419,6 +1429,8 @@ var rpcHandlers = map[string]RPCHandler{
 	"wheelReport":                {Func: rpcWheelReport, Params: []string{"wheelY", "wheelX"}},
 	"wakeHost":                   {Func: rpcWakeHost},
 	"getVideoState":              {Func: rpcGetVideoState},
+	"getCuaApiConfig":            {Func: rpcGetCuaApiConfig},
+	"setCuaApiConfig":            {Func: rpcSetCuaApiConfig, Params: []string{"enabled", "regenerateToken"}},
 	"getUSBState":                {Func: rpcGetUSBState},
 	"unmountImage":               {Func: rpcUnmountImage},
 	"rpcMountBuiltInImage":       {Func: rpcMountBuiltInImage, Params: []string{"filename"}},
@@ -1443,7 +1455,7 @@ var rpcHandlers = map[string]RPCHandler{
 	"getVideoLogStatus":          {Func: rpcGetVideoLogStatus},
 	"getVideoSleepMode":          {Func: rpcGetVideoSleepMode},
 	"setVideoSleepMode":          {Func: rpcSetVideoSleepMode, Params: []string{"duration"}},
-	"setVideoStreamPaused":       {Func: rpcSetVideoStreamPaused, Params: []string{"paused"}},
+	"setVideoStreamPaused":       {Func: rpcSetVideoStreamPaused, Params: []string{"paused"}, OptionalParams: []string{"reason"}},
 	"getDevChannelState":         {Func: rpcGetDevChannelState},
 	"setDevChannelState":         {Func: rpcSetDevChannelState, Params: []string{"enabled"}},
 	"getLocalVersion":            {Func: rpcGetLocalVersion},

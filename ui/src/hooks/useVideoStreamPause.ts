@@ -10,8 +10,11 @@ const pauseLeaseCounts = new WeakMap<RTCDataChannel, number>();
  * so the device does not encode video and serve an upload or the media
  * dialog at the same time. Nested views share one lease per RPC channel, so moving from the
  * virtual media popover into the full dialog does not briefly resume video.
+ *
+ * reason "hidden" marks a pause that only saves work while the tab is in the
+ * background; the device ignores it while a CUA client is reading the screen.
  */
-export function useVideoStreamPause(enabled = true): void {
+export function useVideoStreamPause(enabled = true, reason?: "hidden"): void {
   const rpcDataChannel = useRTCStore(state => state.rpcDataChannel);
   const { send } = useJsonRpc();
 
@@ -22,7 +25,10 @@ export function useVideoStreamPause(enabled = true): void {
     const acquire = () => {
       if (acquired || rpcDataChannel.readyState !== "open") return;
       const leases = pauseLeaseCounts.get(rpcDataChannel) ?? 0;
-      if (leases === 0) send("setVideoStreamPaused", { paused: true });
+      // A full pause also upgrades an existing "hidden" one.
+      if (leases === 0 || !reason) {
+        send("setVideoStreamPaused", reason ? { paused: true, reason } : { paused: true });
+      }
       pauseLeaseCounts.set(rpcDataChannel, leases + 1);
       acquired = true;
     };
@@ -43,5 +49,5 @@ export function useVideoStreamPause(enabled = true): void {
       pauseLeaseCounts.delete(rpcDataChannel);
       send("setVideoStreamPaused", { paused: false });
     };
-  }, [enabled, rpcDataChannel, send]);
+  }, [enabled, reason, rpcDataChannel, send]);
 }

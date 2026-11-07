@@ -60,7 +60,7 @@ func isHostDisplayAdvertised() bool {
 }
 
 func shouldAdvertiseHostDisplayLocked() bool {
-	return !config.HideDisplayWhenIdle || getActiveSessions() > 0
+	return !config.HideDisplayWhenIdle || getActiveSessions() > 0 || cuaVideoLease.Active()
 }
 
 func setHostDisplayAdvertised(enabled bool, reason string, force bool) error {

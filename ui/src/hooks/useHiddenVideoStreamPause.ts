@@ -26,5 +26,5 @@ export function useHiddenVideoStreamPause(): void {
     };
   }, []);
 
-  useVideoStreamPause(paused);
+  useVideoStreamPause(paused, "hidden");
 }

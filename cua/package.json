@@ -1,0 +1,9 @@
+{
+  "name": "kvm-cua",
+  "private": true,
+  "description": "Shortcuts for the KVM computer-using agent. Run from cua/.",
+  "scripts": {
+    "deploy": "scripts/deploy.sh",
+    "cua": "scripts/start.sh"
+  }
+}

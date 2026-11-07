@@ -1,7 +1,14 @@
-@AGENTS.md
+## Repository layout
+- Root: JetKVM firmware (Go backend, C native layer in `internal/native/cgo`, React UI in `ui/`).
+  See DEVELOPMENT.md for building and deploying to a device.
+- `internal/cuaapi/` + `cua_api.go`: the device side of the computer-using agent (CUA):
+  a bearer-token HTTP API under `/api/cua` for frames and HID input.
+- `cua/`: the off-device CUA service (Python, uv). It parses the screen (OmniParser v2), decides
+  with TypeSafe Jev, drives the mouse and keyboard, and is exposed to the LeanScope agent server
+  as an MCP server. See `cua/README.md`.
 
 ## Versioning
-- Change the version number in this project's (leanscope-agent-kit-angular-quickstart) package.json after each session (only in case there was a commit in between!). For minor things (fixes and mini enhancements), increase the third number, for major update that lead to a committed plan change the second number. The first number I will change manually, as it stands for major upGrades, not majore upDates.
+- Change the CUA version number in `cua/pyproject.toml` after each session (only in case there was a commit in between!). For minor things (fixes and mini enhancements), increase the third number, for major update that lead to a committed plan change the second number. The first number I will change manually, as it stands for major upGrades, not majore upDates. Leave the JetKVM firmware version (Makefile, upstream releases) alone.
 - Track all major updates and upgrades in a RELEASES.md release notes file.
 
 ## Spelling

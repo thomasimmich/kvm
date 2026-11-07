@@ -195,6 +195,9 @@ func setupRouter() *gin.Engine {
 		logging.AttachSSEHandler(developerModeRouter)
 	}
 
+	// CUA API: bearer-token protected, independent of the browser login cookie
+	registerCuaRoutes(r)
+
 	// Protected routes (allows both password and noPassword modes)
 	protected := r.Group("/")
 	protected.Use(protectedMiddleware())
