@@ -54,6 +54,14 @@
   #ivBtn.on { background: var(--ok); border-color: var(--ok); color: #fff; }
   .ask { display: none; margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: var(--chip); border: 1px solid var(--warn); }
   .ask.on { display: block; }
+  #stage { position: relative; user-select: none; -webkit-user-select: none; }
+  #stage.control { cursor: crosshair; touch-action: none; outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  #stage.control #shot { pointer-events: none; }
+  #dot { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; pointer-events: none;
+         border: 2px solid #fff; background: rgba(37, 99, 235, .75); box-shadow: 0 0 0 1px rgba(0, 0, 0, .6); transition: left .08s linear, top .08s linear; }
+  #dot.sphero { background: rgba(22, 163, 74, .85); }
+  #ctl.primary { background: var(--accent); }
+  .ev.sphero { border-left: 3px solid var(--warn); padding-left: 6px; }
   #qr svg { width: 180px; height: 180px; display: block; margin: 4px 0 6px; }
   a { color: var(--accent); word-break: break-all; }
 </style>
@@ -68,12 +76,17 @@
   <section>
     <h2>Remote screen
       <span style="float:right; text-transform:none; letter-spacing:0">
+        <button id="ctl" type="button" title="Move, click and scroll on the remote screen with your mouse (Live view)">🖱 Control</button>
         <button id="modeLive" type="button">Live</button>
         <button id="modeParsed" type="button">Parsed</button>
       </span>
     </h2>
-    <img id="shot" alt="The remote screen" hidden onload="this.hidden=false">
+    <div id="stage">
+      <img id="shot" alt="The remote screen" hidden onload="this.hidden=false" draggable="false">
+      <div id="dot" hidden title="Pointer"></div>
+    </div>
     <div class="meta" id="screenMeta">connecting to the KVM …</div>
+    <div class="meta" id="ctlMeta"></div>
   </section>
   <div style="display:grid; gap:12px; align-content:start; min-width:0">
     <section id="ls" hidden>
@@ -131,6 +144,18 @@
         <button id="resume">Resume</button>
       </div>
       <div class="ask" id="ask"></div>
+    </section>
+    <section>
+      <h2>Physical mouse (Sphero)</h2>
+      <label style="display:flex; gap:6px; align-items:center"><input id="spOn" type="checkbox" style="width:auto"> Mirror the pointer to the Sphero mouse</label>
+      <label for="spUrl">Sphero server address (from its log: “Reachable … http://…:8765”)</label>
+      <input id="spUrl" placeholder="http://192.168.x.y:8765" disabled>
+      <div class="row">
+        <button id="spConnect" type="button" disabled>Connect</button>
+        <button id="spStop" type="button" disabled>Stop the mouse</button>
+      </div>
+      <div class="meta" id="spMeta"></div>
+      <div class="meta">The Sphero server has no authentication: anyone on the same Wi-Fi can drive the mouse. Its web app must be open, calibrated and visible on the Mac it is connected to.</div>
     </section>
     <section id="rc" hidden>
       <h2>Remote control</h2>
@@ -197,10 +222,133 @@ async function refreshLive(force) {
   } catch (e) { err = "the CUA service is not reachable"; }
   liveBusy = false;
   liveFailing = !!err;
-  liveNext = Date.now() + (err ? 10000 : 0);
+  liveNext = Date.now() + (err ? 10000 : control ? 300 : 1800);
   if (err && mode === "live") $("screenMeta").textContent = "live view unavailable: " + err + " · retrying every 10 s";
 }
-setInterval(refreshLive, 2000);
+setInterval(refreshLive, 400);  // every 2 s, every 0.4 s while you control the pointer
+
+// Manual control in the live view, like the JetKVM web UI: hover moves the pointer, press and release
+// click (left, right, middle), the wheel scrolls. Moves go out at most 10 times a second; one request
+// at a time, so a press never overtakes the move before it.
+let control = false, ptrBusy = false, ptrQueue = [], ptrPending = null, ptrTimer = null, ptrLast = 0, ptrLocalUntil = 0;
+let wheelAcc = 0, wheelAt = null, wheelTimer = null;
+function ctlMeta(text, bad) { $("ctlMeta").innerHTML = bad ? `<span style="color:var(--bad)">${escapeHtml(text)}</span>` : escapeHtml(text); }
+function setControl(on) {
+  control = on;
+  $("ctl").className = on ? "primary" : "";
+  $("stage").classList.toggle("control", on);
+  if (on && mode !== "live") setMode("live");
+  ctlMeta(on ? "Control on: your mouse drives the remote pointer. Right-click and the wheel work too." : "");
+  if (on) refreshLive(true);
+}
+$("ctl").onclick = () => setControl(!control);
+// The image keeps its aspect ratio; the guard below still maps correctly if it is ever letterboxed.
+function relPos(e) {
+  const img = $("shot"), r = img.getBoundingClientRect();
+  const ar = (img.naturalWidth || r.width) / (img.naturalHeight || r.height || 1);
+  let w = r.width, h = r.height, ox = 0, oy = 0;
+  if (r.width / r.height > ar) { w = r.height * ar; ox = (r.width - w) / 2; } else { h = r.width / ar; oy = (r.height - h) / 2; }
+  const clamp = v => Math.min(1, Math.max(0, v));
+  return { x: clamp((e.clientX - r.left - ox) / w), y: clamp((e.clientY - r.top - oy) / h) };
+}
+function showDot(xPct, yPct) { const d = $("dot"); d.hidden = false; d.style.left = xPct + "%"; d.style.top = yPct + "%"; }
+function ptrSend(path, body, move) {
+  const last = ptrQueue[ptrQueue.length - 1];
+  if (move && last && last.move) ptrQueue[ptrQueue.length - 1] = { path, body, move };
+  else ptrQueue.push({ path, body, move });
+  ptrPump();
+}
+async function ptrPump() {
+  if (ptrBusy || !ptrQueue.length) return;
+  ptrBusy = true;
+  const it = ptrQueue.shift();
+  try {
+    const r = await fetch(it.path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(it.body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.ok === false) ctlMeta(j.error || ("HTTP " + r.status), true);
+    else if ($("ctlMeta").querySelector("span")) ctlMeta("Control on.");
+  } catch (e) { ctlMeta("the CUA service is not reachable", true); }
+  ptrBusy = false;
+  ptrPump();
+}
+function flushMove() {
+  clearTimeout(ptrTimer); ptrTimer = null;
+  if (!ptrPending) return;
+  ptrLast = Date.now();
+  ptrSend("/dashboard/api/pointer", ptrPending, true);
+  ptrPending = null;
+}
+const stage = $("stage");
+stage.addEventListener("pointermove", (e) => {
+  if (!control || $("shot").hidden) return;
+  const p = relPos(e);
+  showDot(p.x * 100, p.y * 100); ptrLocalUntil = Date.now() + 1500;
+  ptrPending = { x: p.x, y: p.y, buttons: e.buttons & 7 };
+  if (!ptrTimer) ptrTimer = setTimeout(flushMove, Math.max(0, 100 - (Date.now() - ptrLast)));
+});
+function onButton(e) {
+  if (!control || $("shot").hidden) return;
+  e.preventDefault();
+  if (e.type === "pointerdown") stage.setPointerCapture(e.pointerId);  // the release arrives even outside the image
+  const p = relPos(e);
+  ptrPending = null; flushMove();
+  ptrSend("/dashboard/api/pointer", { x: p.x, y: p.y, buttons: e.buttons & 7 }, false);
+}
+stage.addEventListener("pointerdown", onButton);
+stage.addEventListener("pointerup", onButton);
+stage.addEventListener("contextmenu", (e) => { if (control) e.preventDefault(); });
+stage.addEventListener("wheel", (e) => {
+  if (!control || $("shot").hidden || !e.deltaY) return;
+  e.preventDefault();
+  wheelAcc += e.deltaY > 0 ? -1 : 1;  // the device's dy > 0 scrolls up
+  wheelAt = relPos(e);
+  if (!wheelTimer) wheelTimer = setTimeout(() => {
+    wheelTimer = null;
+    const dy = Math.max(-3, Math.min(3, wheelAcc)); wheelAcc = 0;
+    if (dy) ptrSend("/dashboard/api/wheel", { x: wheelAt.x, y: wheelAt.y, dy, dx: 0 }, false);
+  }, 80);
+}, { passive: false });
+function renderPointer(pos, sp) {
+  $("dot").classList.toggle("sphero", !!(sp && sp.enabled && !sp.error));
+  if (!pos || Date.now() < ptrLocalUntil) return;  // your own moves show at once; this follows the agent's
+  showDot(pos.x, pos.y);
+}
+
+// The physical Sphero mouse: the CUA service sends it every pointer move (yours and the agent's).
+let spWant = false;
+function renderSphero(sp) {
+  if (!sp) return;
+  const on = sp.enabled || spWant;
+  $("spOn").checked = on;
+  $("spUrl").disabled = !on; $("spConnect").disabled = !on; $("spStop").disabled = !sp.enabled;
+  if (document.activeElement !== $("spUrl") && !$("spUrl").dataset.dirty) $("spUrl").value = sp.url || "";
+  $("spConnect").textContent = sp.enabled ? "Reconnect" : "Connect";
+  const parts = [];
+  if (sp.enabled) {
+    parts.push(`connected to <code>${escapeHtml(sp.url)}</code>`);
+    if (sp.state) parts.push(`target: <b>${escapeHtml(sp.state)}</b>` + (sp.detail ? " · " + escapeHtml(sp.detail) : ""));
+    parts.push(`${sp.sent} target(s) sent`);
+  } else if (on) parts.push("enter the address and press Connect");
+  else parts.push("off");
+  if (sp.error) parts.push(`<span style="color:var(--bad)">${escapeHtml(sp.error)}</span>`);
+  $("spMeta").innerHTML = parts.join(" · ");
+}
+async function spConnect() {
+  $("spConnect").disabled = true; $("spMeta").textContent = "connecting …";
+  try { renderSphero(await api("/dashboard/api/sphero", { enabled: true, url: $("spUrl").value })); delete $("spUrl").dataset.dirty; }
+  catch (e) { $("spMeta").innerHTML = `<span style="color:var(--bad)">${escapeHtml(e.message)}</span>`; }
+  $("spConnect").disabled = false;
+}
+$("spOn").onchange = async () => {
+  spWant = $("spOn").checked;
+  $("spUrl").disabled = $("spConnect").disabled = !spWant;
+  if (spWant) { if ($("spUrl").value.trim()) spConnect(); else $("spUrl").focus(); return; }
+  try { renderSphero(await api("/dashboard/api/sphero", { enabled: false })); } catch (e) { alert(e.message); }
+};
+$("spUrl").oninput = () => { $("spUrl").dataset.dirty = "1"; };
+$("spUrl").onkeydown = (e) => { if (e.key === "Enter") spConnect(); };
+$("spConnect").onclick = spConnect;
+$("spStop").onclick = async () => { try { renderSphero(await api("/dashboard/api/sphero/stop", {})); } catch (e) { alert(e.message); } };
 $("cancel").onclick = () => post("/dashboard/api/cancel");
 $("tell").onclick = async () => { const t = $("guide").value.trim(); if (!t) return; await post("/dashboard/api/guidance", { text: t }); $("guide").value = ""; };
 $("guide").onkeydown = (e) => { if (e.key === "Enter") $("tell").onclick(); };
@@ -313,7 +461,7 @@ let lastEventKey = "";
 function renderEvents(events) {
   const log = $("log");
   const shown = ["decision", "run_start", "run_end", "screen", "screen_description", "activity", "guidance_received",
-                 "paused", "resumed", "cancel_requested", "ask_human", "ask_human_end", "inner_voice"];
+                 "paused", "resumed", "cancel_requested", "ask_human", "ask_human_end", "inner_voice", "sphero"];
   const all = events.filter(e => shown.includes(e.type));
   const key = all.length + ":" + (all.length ? all[all.length - 1].ts : "");
   if (key === lastEventKey) return;  // unchanged: keep the scroll position
@@ -325,11 +473,13 @@ function renderEvents(events) {
   for (const e of items) {
     const d = document.createElement("div");
     d.className = "ev" + ({ activity: " muted", screen_description: " desc", guidance_received: " human", paused: " human",
-                            resumed: " human", cancel_requested: " human", ask_human: " human", inner_voice: " inner" }[e.type] || "");
+                            resumed: " human", cancel_requested: " human", ask_human: " human", inner_voice: " inner" }[e.type] || "")
+      + (e.type === "sphero" ? (["rejected", "unreachable"].includes(e.state) ? " sphero" : " muted") : "");
     const t = new Date(e.ts * 1000).toLocaleTimeString();
     let html = `<span class="t">${t}</span>`;
     if (e.type === "run_start") html += `<b>start</b> ${escapeHtml(e.goal)}`;
     else if (e.type === "activity") html += escapeHtml(e.text);
+    else if (e.type === "sphero") html += "🖱 " + escapeHtml(e.text);
     else if (e.type === "inner_voice") html += `<b>💭 ${escapeHtml(e.persona || "inner voice")}:</b> <i>${escapeHtml(e.text)}</i>`
       + (e.clip ? ` <button type="button" data-clip="${escapeHtml(e.clip)}" title="Play again">▶</button>` : "");
     else if (e.type === "screen_description") html += `<b>screen description</b> <span class="t">(${((e.ms || 0) / 1000).toFixed(1)} s)</span>: ${escapeHtml(e.text)}`;
@@ -475,6 +625,8 @@ async function tick() {
     renderAsk(s.events || [], s.running);
     renderNarration(s.narration);
     renderInnerVoice(s.innerVoice);
+    renderPointer(s.pointer, s.sphero);
+    renderSphero(s.sphero);
     queueInnerVoice(s.events || []);
     if (res) $("result").textContent = `${res.status}: ${res.message}\n` + (res.steps || []).map(x => `${x.step}. ${x.action} → ${x.outcome}`).join("\n");
     $("run").disabled = s.running;

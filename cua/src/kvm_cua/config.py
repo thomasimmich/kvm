@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Dashboard
     cua_dashboard_port: int = 8766
 
+    # Physical Sphero mouse that mirrors the pointer (dashboard switch; the URL can be changed there)
+    cua_sphero_url: str = ""  # e.g. http://192.168.1.20:8765, from the Sphero server's log
+    cua_sphero_state_file: Path = Path(".sphero-mouse.json")  # on/off + URL from the dashboard; git-ignored
+
     # Human steering: when stuck, ask the human (dashboard or remote control) and wait this long
     cua_human_wait_s: float = 45.0
 

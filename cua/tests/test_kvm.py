@@ -66,6 +66,22 @@ def test_actuator_abs_mapping_and_click():
     assert (down.x, down.y) == a.to_abs(960, 540)
 
 
+def test_pointer_raw_event_and_move_hook():
+    kvm = FakeKvm([Image.new("RGB", (1920, 1080))])
+    a = Actuator(kvm, seed=3)
+    moves: list[tuple[float, float]] = []
+    a.on_move = lambda x, y: moves.append((x, y))
+    a.pointer(959.5, 539.5, buttons=2)
+    mouse = [e for kind, e in kvm.events if kind == "mouse"]
+    assert len(mouse) == 1 and mouse[0].buttons == 2 and mouse[0].delay_ms == 0
+    assert (mouse[0].x, mouse[0].y) == a.to_abs(959.5, 539.5)
+    a.click(100, 200)
+    assert moves == [(959.5, 539.5), (100, 200)]  # one target per move, not every path point
+    a.on_move = lambda x, y: 1 / 0  # a broken mirror must not break the input
+    a.move_to(300, 300)
+    assert a.position == (300, 300)
+
+
 def test_scroll_directions():
     kvm = FakeKvm([Image.new("RGB", (800, 600))])
     a = Actuator(kvm, seed=1)

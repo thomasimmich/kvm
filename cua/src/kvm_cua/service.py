@@ -20,7 +20,8 @@ from .config import Settings
 from .decision.decider import Decider, JevDecider, StubDecider
 from .decision.jev import JevClient
 from .kvm.actuation import Actuator
-from .kvm.device import HttpKvm, KvmDevice
+from .kvm.device import HttpKvm, KvmDevice, WheelEvent
+from .kvm.sphero import SpheroMirror
 from .narration.agent_server import AgentServerClient
 from .narration.inner_voice import InnerVoice, Speaker, Thinker
 from .narration.leanscope_auth import ChoreoSelection, LeanScopeAuth, LeanScopeCatalog
@@ -44,6 +45,10 @@ class LiveState:
     running: bool = False
     highlight: int | None = None
     last_result: dict | None = None
+
+
+class Busy(RuntimeError):
+    """The agent holds the mouse (a run or a manual tool call)."""
 
 
 class CuaService:
@@ -78,6 +83,7 @@ class CuaService:
             )
             self.narration.on_command = self.command
         self.inner_voice = self._make_inner_voice()
+        self.sphero = SpheroMirror(self._on_event, settings.cua_sphero_state_file, settings.cua_sphero_url)
 
     def _make_inner_voice(self) -> InnerVoice:
         s = self.settings
@@ -141,17 +147,24 @@ class CuaService:
             describer, off_reason = make_describer(
                 s.cua_vision_provider, s.openai_api_key, s.cua_vision_model, s.cua_vision_base_url
             )
+            actuator = Actuator(self.device, layout=s.kvm_keyboard_layout)
+            actuator.on_move = self._mirror_move  # agent and manual moves both reach the Sphero
             self._agent = Agent(
                 self.device,
                 self.parser,
                 self.decider,
-                Actuator(self.device, layout=s.kvm_keyboard_layout),
+                actuator,
                 runs_dir=s.cua_runs_dir,
                 on_event=self._on_event,
                 describer=describer,
             )
             self._agent.describe_off_reason = off_reason
         return self._agent
+
+    def _mirror_move(self, x: float, y: float) -> None:
+        if self.sphero.enabled:
+            w, h = self.device.screen_size()
+            self.sphero.push(x / max(w - 1, 1) * 100, y / max(h - 1, 1) * 100)
 
     def _on_event(self, ev: dict) -> None:
         pub = self._publisher
@@ -256,6 +269,49 @@ class CuaService:
 
     def press(self, combo: str) -> Screen:
         return self._act_then_observe(lambda prev: self.agent.actuator.press(combo))
+
+    # --- manual pointer from the dashboard's live view -------------------------------
+
+    def _manual(self, fn) -> None:
+        """Runs fn(actuator, w, h) unless the agent has the mouse. Short waits serialise the
+        dashboard's own requests; a run in progress is refused at once."""
+        if self.live.running:
+            raise Busy("the agent is running: cancel or pause it first")
+        agent = self.agent
+        if not agent.lock.acquire(timeout=2.0):
+            raise Busy("the agent is busy with an action")
+        try:
+            fn(agent.actuator, *self.device.screen_size())
+        finally:
+            agent.lock.release()
+
+    def pointer_at(self, rx: float, ry: float, buttons: int = 0) -> None:
+        """rx, ry: 0..1 of the screen; buttons: bit 1 left, 2 right, 4 middle."""
+        rx, ry = min(max(rx, 0.0), 1.0), min(max(ry, 0.0), 1.0)
+        self._manual(lambda a, w, h: a.pointer(rx * (w - 1), ry * (h - 1), int(buttons)))
+
+    def wheel_at(self, rx: float, ry: float, dy: int, dx: int = 0) -> None:
+        """Wheel notches at a point (positive dy scrolls up, like the device)."""
+        rx, ry = min(max(rx, 0.0), 1.0), min(max(ry, 0.0), 1.0)
+
+        def act(a: Actuator, w: int, h: int) -> None:
+            x, y = rx * (w - 1), ry * (h - 1)
+            if a.position != (x, y):
+                a.pointer(x, y)
+            a.device.wheel([WheelEvent(max(-127, min(127, int(dy))), max(-127, min(127, int(dx))), 0)])
+
+        self._manual(act)
+
+    def pointer_state(self) -> dict | None:
+        """The last known pointer position in percent (None until the first move)."""
+        pos = self._agent.actuator.position if self._agent else None
+        if pos is None:
+            return None
+        try:
+            w, h = self.device.screen_size()
+        except Exception:  # noqa: BLE001 — no picture yet
+            return None
+        return {"x": pos[0] / max(w - 1, 1) * 100, "y": pos[1] / max(h - 1, 1) * 100}
 
     def annotated_jpeg(self) -> bytes | None:
         scr = self.agent.last_screen if self._agent else None

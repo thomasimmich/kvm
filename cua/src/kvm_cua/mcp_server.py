@@ -27,8 +27,9 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent.inbox import Command, parse_command
+from .kvm.sphero import SpheroError
 from .narration.leanscope_auth import ChoreoSelection, LeanScopeError
-from .service import CuaService, screen_text
+from .service import Busy, CuaService, screen_text
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,8 @@ def build_server(service: CuaService) -> MCPServer:
             "describer": "vision" if service._agent and service._agent.describer else "off",
             "narration": narration_state(),
             "innerVoice": service.inner_voice.state(),
+            "pointer": service.pointer_state(),
+            "sphero": service.sphero.snapshot(),
         })  # fmt: skip
 
     @mcp.custom_route("/dashboard/api/inner-voice/{clip}.mp3", methods=["GET"])
@@ -204,6 +207,69 @@ def build_server(service: CuaService) -> MCPServer:
         except Exception as e:  # noqa: BLE001 — shown in the dashboard
             return PlainTextResponse(str(e), status_code=503)
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    # --- manual pointer in the live view, and the physical Sphero mouse --------------
+
+    async def manual(fn, *args) -> Response:
+        try:
+            await blocking(fn, *args)
+        except Busy as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+        except Exception as e:  # noqa: BLE001 — shown on the dashboard
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+        return JSONResponse({"ok": True, "result": service.pointer_state()})
+
+    def num(b: dict, key: str) -> float:
+        v = b.get(key)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            raise ValueError(f"{key} must be a number")  # noqa: TRY004 — a 400 for the dashboard
+        return float(v)
+
+    @mcp.custom_route("/dashboard/api/pointer", methods=["POST"])
+    async def dashboard_pointer(request: Request) -> Response:
+        """{x, y, buttons}: x, y in 0..1 of the screen; buttons 1 left, 2 right, 4 middle (0 = none)."""
+        b = await request.json()
+        try:
+            x, y, buttons = num(b, "x"), num(b, "y"), int(b.get("buttons") or 0)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return await manual(service.pointer_at, x, y, buttons)
+
+    @mcp.custom_route("/dashboard/api/wheel", methods=["POST"])
+    async def dashboard_wheel(request: Request) -> Response:
+        """{x, y, dy, dx}: wheel notches at a point (dy > 0 scrolls up)."""
+        b = await request.json()
+        try:
+            x, y = num(b, "x"), num(b, "y")
+            dy, dx = int(b.get("dy") or 0), int(b.get("dx") or 0)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return await manual(service.wheel_at, x, y, dy, dx)
+
+    @mcp.custom_route("/dashboard/api/sphero", methods=["GET", "POST"])
+    async def dashboard_sphero(request: Request) -> Response:
+        """GET: state. POST {enabled, url}: turn the mirror on (checks /health) or off."""
+        if request.method == "GET":
+            return JSONResponse({"ok": True, "result": service.sphero.snapshot()})
+        b = await request.json()
+        try:
+            if b.get("enabled") is True:
+                res = await blocking(service.sphero.enable, str(b.get("url") or ""))
+                pos = service.pointer_state()
+                if pos is not None:  # drive to where the pointer is now
+                    service.sphero.push(pos["x"], pos["y"])
+            else:
+                res = await blocking(service.sphero.disable)
+        except SpheroError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+        return JSONResponse({"ok": True, "result": res})
+
+    @mcp.custom_route("/dashboard/api/sphero/stop", methods=["POST"])
+    async def dashboard_sphero_stop(_: Request) -> Response:
+        try:
+            return JSONResponse({"ok": True, "result": await blocking(service.sphero.stop)})
+        except SpheroError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
 
     @mcp.custom_route("/dashboard/api/observe", methods=["POST"])
     async def dashboard_observe(_: Request) -> Response:

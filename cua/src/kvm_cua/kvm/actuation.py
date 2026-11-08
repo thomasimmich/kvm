@@ -8,14 +8,18 @@ real timing, so network jitter does not distort it.
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 from .device import ABS_MAX, KeyEvent, KvmDevice, MouseEvent, WheelEvent
 from .keymap import combo, text_to_events
+
+log = logging.getLogger(__name__)
 
 BUTTONS = {"left": 1, "right": 2, "middle": 4}
 Direction = Literal["up", "down", "left", "right"]
@@ -95,6 +99,8 @@ class Actuator:
         self.rng = random.Random(seed)
         self._pos: tuple[float, float] | None = None
         self._buttons = 0
+        # called with the pixel target of every pointer move (e.g. to mirror it to a physical mouse)
+        self.on_move: Callable[[float, float], None] | None = None
 
     # --- coordinates ---------------------------------------------------------
 
@@ -120,8 +126,23 @@ class Actuator:
                 min(max(y + self.rng.uniform(-150, 150), 0), h - 1),
             )
         path = human_path(self._pos, (x, y), self.rng, self.profile)
+        self._moved(x, y)
         self.device.mouse([self._event(px, py, d) for px, py, d in path])
         self._pos = (x, y)
+
+    def pointer(self, x: float, y: float, buttons: int = 0) -> None:
+        """One raw event at once (manual control from the dashboard): no path, no timing."""
+        ax, ay = self.to_abs(x, y)
+        self._moved(x, y)
+        self.device.mouse([MouseEvent(ax, ay, buttons & 0x1F, 0)])
+        self._pos = (x, y)
+
+    def _moved(self, x: float, y: float) -> None:
+        if self.on_move is not None:
+            try:
+                self.on_move(x, y)
+            except Exception as e:  # noqa: BLE001 — a mirror must never break the real input
+                log.warning("pointer mirror failed: %s", e)
 
     def _event(self, x: float, y: float, delay_ms: int) -> MouseEvent:
         ax, ay = self.to_abs(x, y)

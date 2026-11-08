@@ -154,6 +154,30 @@ See [docs/agent-server-integration.md](docs/agent-server-integration.md) for con
   - The "🔊 Inner voice" switch in the activity log turns it on and off. A click on ▶ replays a thought.
   - The LeanScope panel shows the persona (photo, name) and its voice, with "▶ Test voice".
 
+## Driving the pointer yourself, and the physical Sphero mouse
+
+- **🖱 Control** (above the live view) lets your own mouse drive the remote pointer, like the
+  JetKVM web UI: hovering moves it, press and release click (left, right, middle), and the
+  wheel scrolls.
+  - Coordinates are absolute.
+  - Moves go out at most 10 times a second, and the live view refreshes about every 0.4 s
+    while Control is on.
+  - The dashboard refuses input while a run is going (cancel or pause the run first).
+- **Pointer dot:** a dot on the live view shows where the pointer is, after your moves and
+  after the agent's.
+- **Physical mouse (Sphero):** tick "Mirror the pointer to the Sphero mouse", enter the Sphero
+  server's address (from its log, e.g. `http://192.168.1.20:8765`) and press Connect.
+  - The CUA service checks `/health`, then sends every pointer target, yours and the agent's,
+    as `POST /target {x, y}` in percent of the screen.
+  - The latest target wins, and at most 10 targets go out per second.
+  - "Stop the mouse" sends `POST /stop`. Turning the mirror off sends `/stop` too.
+  - The dot turns green while the mirror is on.
+  - Rejections (e.g. the Sphero web app is not calibrated) and connection errors show up once
+    each in the activity log.
+  - On/off and the address are kept in `CUA_SPHERO_STATE_FILE` (default `.sphero-mouse.json`,
+    git-ignored). `CUA_SPHERO_URL` sets the first address.
+  - The Sphero server has no authentication: use it only on trusted networks.
+
 ## Performance (M3 Pro, 1920×1280 screen)
 
 | Stage | Time |
@@ -171,6 +195,7 @@ See [docs/agent-server-integration.md](docs/agent-server-integration.md) for con
 | `kvm/device.py` | `KvmDevice` interface; `HttpKvm` for the real device; `FakeKvm` for replays and tests |
 | `kvm/decode.py` | Decodes the device's GOP with PyAV, keeping the last picture |
 | `kvm/actuation.py` | Human-like mouse paths, clicks, scrolling and typing |
+| `kvm/sphero.py` | Mirrors pointer targets to the physical Sphero mouse server (rate-limited, own thread) |
 | `kvm/keymap.py` | Text and key combos to HID codes, using `data/keymaps.json`, which is generated from `ui/src/keyboardLayouts` by `scripts/export_keymaps.sh` |
 | `perception/parser.py` | OmniParser v2 (also `ocr`-only and `null` parsers) |
 | `perception/screen.py` | Change detection and new-element detection |

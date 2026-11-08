@@ -1,5 +1,28 @@
 # Release notes
 
+## CUA 0.5.0: drive the pointer in the live view, mirrored to a physical Sphero mouse (2026-11-08)
+
+**`cua/` service**
+- **🖱 Control in the live view:** your own mouse drives the remote pointer with absolute
+  coordinates, like the JetKVM web UI.
+  - Hovering moves the pointer. Press and release click (left, right, middle), and the wheel scrolls.
+  - Moves go out at most 10 times a second, one request at a time, so a click never overtakes
+    the move before it.
+  - The live view refreshes about every 0.4 s while Control is on.
+  - Input is refused while a run is going.
+  - New routes: `POST /dashboard/api/pointer {x, y, buttons}` (x and y from 0 to 1) and
+    `POST /dashboard/api/wheel`.
+- **Pointer dot:** a dot on the live view shows the pointer position, both your moves and the agent's.
+- **Physical Sphero mouse:** a new dashboard panel mirrors every pointer move, yours and the
+  agent's, to Johann's Sphero mouse server.
+  - The server receives `POST /target` with x and y in percent of the screen.
+  - It has an on/off switch, an address field (checked with `/health` on connect) and
+    "Stop the mouse".
+  - The latest target wins: at most 10 targets per second, and changes under 0.3 % are skipped.
+  - Rejections and connection errors show up once each in the activity log.
+  - New settings: `CUA_SPHERO_URL` and `CUA_SPHERO_STATE_FILE` (default
+    `.sphero-mouse.json`, which keeps on/off and the address).
+
 ## CUA 0.4.0: the acting persona's inner voice (2026-11-08)
 
 **`cua/` service**

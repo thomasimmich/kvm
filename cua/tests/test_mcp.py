@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from conftest import elements, make_screen
 from starlette.testclient import TestClient
 
@@ -17,7 +18,7 @@ SETTINGS = [("General", (20, 100, 200, 140))]
 def service(tmp_path):
     imgs = [make_screen(HOME), make_screen(SETTINGS)]
     parser = FixtureParser([elements(HOME), elements(SETTINGS)]).bind(imgs)
-    s = Settings(cua_runs_dir=tmp_path, _env_file=None)
+    s = Settings(cua_runs_dir=tmp_path, cua_sphero_state_file=tmp_path / "sphero.json", _env_file=None)
     svc = CuaService(s, device=FakeKvm(imgs), parser=parser, decider=StubDecider(done_when="general"))
     svc.agent.settle_interval_s = svc.agent.settle_timeout_s = 0.0
     return svc
@@ -61,3 +62,50 @@ def test_bearer_auth(tmp_path):
     with TestClient(app(), client=("127.0.0.1", 1234)) as c:
         assert c.get("/dashboard/api/state").status_code == 200
         assert c.post("/mcp", json={}).status_code == 401
+
+
+def test_dashboard_pointer_wheel_and_sphero(tmp_path):
+    from test_sphero import FakeSphero
+
+    from kvm_cua.kvm.device import ABS_MAX
+
+    svc = service(tmp_path)
+    fake = FakeSphero()
+    svc.sphero.client_factory = fake.factory
+    kvm = svc.device
+    with TestClient(build_server(svc).streamable_http_app(host="127.0.0.1")) as c:
+        assert c.get("/dashboard/api/state").json()["pointer"] is None
+        r = c.post("/dashboard/api/pointer", json={"x": 1.0, "y": 0.5, "buttons": 1})
+        assert r.status_code == 200, r.text
+        ev = [e for kind, e in kvm.events if kind == "mouse"][-1]
+        assert (ev.x, ev.buttons) == (ABS_MAX, 1)
+        assert c.post("/dashboard/api/pointer", json={"x": "a", "y": 0}).status_code == 400
+
+        assert c.post("/dashboard/api/wheel", json={"x": 0.5, "y": 0.5, "dy": -2}).status_code == 200
+        assert [e.dy for kind, e in kvm.events if kind == "wheel"] == [-2]
+
+        st = c.get("/dashboard/api/state").json()
+        assert st["pointer"]["x"] == pytest.approx(50, abs=0.2)  # the wheel moved the pointer first
+        assert st["sphero"]["enabled"] is False
+
+        r = c.post("/dashboard/api/sphero", json={"enabled": True, "url": "10.0.0.9"})
+        assert r.json()["result"]["url"] == "http://10.0.0.9:8765"
+        c.post("/dashboard/api/pointer", json={"x": 0.25, "y": 0.75})
+        assert wait(lambda: fake.targets() and fake.targets()[-1] == {"x": 25.0, "y": 75.0})
+        assert c.post("/dashboard/api/sphero/stop").status_code == 200
+        c.post("/dashboard/api/sphero", json={"enabled": False})
+        assert c.get("/dashboard/api/sphero").json()["result"]["enabled"] is False
+
+        svc.live.running = True
+        assert c.post("/dashboard/api/pointer", json={"x": 0, "y": 0}).status_code == 409
+
+
+def wait(cond, timeout=2.0):
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
