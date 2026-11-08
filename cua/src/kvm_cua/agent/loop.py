@@ -12,10 +12,13 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal
+
+from PIL import Image
 
 from ..decision.decider import Action, Decider, DecisionContext
 from ..kvm.actuation import Actuator
@@ -23,12 +26,14 @@ from ..kvm.device import KvmDevice
 from ..perception.parser import UIParser
 from ..perception.screen import changed_fraction, dhash, hamming, iou, new_elements, screens_differ
 from ..perception.types import Screen, UIElement
+from .inbox import Command, GuidanceInbox
 from .trace import Trace
 
 log = logging.getLogger(__name__)
 
 Status = Literal["done", "stuck", "max_steps", "time_budget", "cancelled", "error"]
 PROGRESS_THRESHOLD = 0.5
+DESCRIBE_MIN_CHANGE = 40  # dhash bits (of 256) that make a screen new enough to describe again
 
 
 @dataclass
@@ -53,6 +58,7 @@ class RunResult:
     trace_dir: str = ""
     final_screen: str = ""
     seconds: float = 0.0
+    session_url: str = ""  # the live LeanScope session that narrated this run, if any
 
     def summary(self) -> str:
         lines = [
@@ -65,6 +71,8 @@ class RunResult:
             lines.append("final screen (excerpt):\n" + self.final_screen)
         if self.trace_dir:
             lines.append(f"trace: {self.trace_dir}")
+        if self.session_url:
+            lines.append(f"live session: {self.session_url}")
         return "\n".join(lines)
 
     def to_json(self) -> dict:
@@ -90,6 +98,7 @@ class Agent:
         settle_timeout_s: float = 4.0,
         settle_interval_s: float = 0.35,
         on_event: Callable[[dict], None] | None = None,
+        describer: Callable[[Image.Image], str] | None = None,
     ):
         self.device = device
         self.parser = parser
@@ -100,9 +109,16 @@ class Agent:
         self.settle_timeout_s = settle_timeout_s
         self.settle_interval_s = settle_interval_s
         self.on_event = on_event
+        self.describer = describer  # fast image-to-text model for a rough screen description
         self.last_screen: Screen | None = None
         self.lock = threading.Lock()  # one run (or manual action) at a time
         self._cancel = threading.Event()
+        self.inbox = GuidanceInbox()
+        self.human_wait_s = 0.0  # > 0: when stuck, ask the human and wait this long for an answer
+        self.ask_after_discards = 3  # also ask after this many discarded attempts in a row
+        self._describe_pool: ThreadPoolExecutor | None = None
+        self._described_phash: int | None = None
+        self._trace: Trace | None = None
 
     # --- perception --------------------------------------------------------------
 
@@ -118,13 +134,16 @@ class Agent:
                 frame = nxt
                 if stable:
                     break
+        phash = dhash(frame.image)
+        self._emit({"type": "screen_raw", "seq": frame.seq, "_image": frame.image})
+        self._maybe_describe(frame.image, frame.seq, phash)
         t0 = time.time()
         elements = self.parser.parse(frame.image)
         screen = Screen(
             image=frame.image,
             elements=elements,
             seq=frame.seq,
-            phash=dhash(frame.image),
+            phash=phash,
             captured_at=frame.captured_at,
             parse_ms=int((time.time() - t0) * 1000),
         )
@@ -134,10 +153,36 @@ class Agent:
             if len(screen.new_element_ids) > 0.6 * max(1, len(elements)):
                 screen.new_element_ids = []
         self.last_screen = screen
-        self._emit(
-            {"type": "screen", "seq": screen.seq, "elements": len(elements), "parse_ms": screen.parse_ms}
-        )
+        self._emit({"type": "screen", "seq": screen.seq, "elements": len(elements), "parse_ms": screen.parse_ms,
+                    "new": len(screen.new_element_ids), "_screen": screen})  # fmt: skip
         return screen
+
+    def _maybe_describe(self, image: Image.Image, seq: int, phash: int) -> None:
+        """Describe the screen in parallel to parsing, once per new view (first screen, page change)."""
+        if self.describer is None:
+            return
+        if self._described_phash is not None and hamming(phash, self._described_phash) < DESCRIBE_MIN_CHANGE:
+            return
+        self._described_phash = phash
+        if self._describe_pool is None:
+            self._describe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="describe")
+        trace, describer = self._trace, self.describer
+
+        def work() -> None:
+            t0 = time.time()
+            try:
+                text = describer(image).strip()
+            except Exception as e:  # noqa: BLE001 — narration must never break a run
+                log.warning("screen description failed: %s", e)
+                return
+            if not text:
+                return
+            ms = int((time.time() - t0) * 1000)
+            if trace is not None:
+                trace.event({"type": "description", "seq": seq, "ms": ms, "text": text})
+            self._emit({"type": "screen_description", "seq": seq, "text": text, "ms": ms})
+
+        self._describe_pool.submit(work)
 
     # --- actions -------------------------------------------------------------------
 
@@ -164,6 +209,29 @@ class Agent:
     def cancel(self) -> None:
         self._cancel.set()
 
+    def command(self, cmd: Command) -> None:
+        """A human command for the running loop (from the dashboard or the remote control)."""
+        self.inbox.put(cmd)
+        if cmd.kind == "cancel":
+            self._cancel.set()
+        names = {"pause": "paused", "resume": "resumed", "cancel": "cancel_requested"}
+        self._emit({"type": names.get(cmd.kind, "guidance_received"), "kind": cmd.kind, "text": cmd.text})
+
+    def _say(self, text: str) -> None:
+        """A micro-level activity line ("asking Jev", "pressed Esc to undo")."""
+        self._emit({"type": "activity", "text": text})
+
+    def _ask_human(self, question: str, deadline: float | None) -> list[str]:
+        wait = self.human_wait_s
+        if deadline is not None:
+            wait = min(wait, deadline - time.time() - 5)
+        if wait <= 0:
+            return []
+        self._emit({"type": "ask_human", "question": question, "wait_s": round(wait)})
+        texts = [c.text for c in self.inbox.wait_for_text(wait, self._cancel)]
+        self._emit({"type": "ask_human_end", "answered": bool(texts), "cancelled": self._cancel.is_set()})
+        return texts
+
     # --- the loop ------------------------------------------------------------------
 
     def run_goal(
@@ -179,6 +247,8 @@ class Agent:
         hard timeout (the agent server allows 120 s per MCP call) always get a summary back."""
         with self.lock:
             self._cancel.clear()
+            self.inbox.reset()
+            self._described_phash = None
             return self._run(goal, hints or [], inputs or {}, max_steps, expect_text, time_budget_s)
 
     def _run(
@@ -202,14 +272,37 @@ class Agent:
         last_desc: str | None = None
         last_record: StepRecord | None = None
         before: Screen | None = None
-        self._emit({"type": "run_start", "goal": goal})
+        guidance: list[str] = []
+        discards = 0  # discarded attempts in a row
+        deadline = t_start + time_budget_s if time_budget_s is not None else None
+        self._trace = trace
+        self._emit({"type": "run_start", "goal": goal, "hints": hints, "max_steps": max_steps})
+
+        def absorb() -> None:
+            """Block while a human paused the run; take in what they said."""
+            if self.inbox.paused:
+                self._say("Paused: waiting for you")
+                self.inbox.wait_while_paused(self._cancel, deadline)
+            for c in self.inbox.take_texts():
+                guidance.append(c.text)
+                history.append(f"human: {c.text}")
+                trace.event({"type": "guidance", "kind": c.kind, "text": c.text})
+
+        def take_answer(texts: list[str]) -> None:
+            for t in texts:
+                guidance.append(t)
+                history.append(f"human: {t}")
+                trace.event({"type": "guidance", "kind": "answer", "text": t})
 
         try:
+            self._say("Looking at the screen")
             screen = self.observe()
             stem = trace.screen(screen)
             for step in range(1, max_steps + 1):
+                absorb()
                 if self._cancel.is_set():
-                    result.status, result.message = "cancelled", "cancelled by caller"
+                    who = "the human" if self.inbox.cancelled else "caller"
+                    result.status, result.message = "cancelled", f"cancelled by {who}"
                     break
                 if time_budget_s is not None and time.time() - t_start > time_budget_s:
                     result.status = "time_budget"
@@ -229,7 +322,9 @@ class Agent:
                     exhausted_scroll=set(exhausted),
                     last_action=last_desc,
                     before=before,
+                    guidance=list(guidance),
                 )
+                self._say("Asking Jev for the next step")
                 t0 = time.time()
                 decision = self.decider.decide(ctx)
                 decide_ms = int((time.time() - t0) * 1000)
@@ -243,19 +338,29 @@ class Agent:
                     if decision.progress is not None and decision.progress < PROGRESS_THRESHOLD:
                         last_record.outcome = "no progress → discarded"
                         history.append(f"{last_desc} → did not help, undone")
+                        discards += 1
                         if last.kind == "click" and before is not None and last.element_id is not None:
                             el = before.element(last.element_id)
                             if el:
                                 tried.append(_Tried(el.label, el.bbox, before.phash))
                         prev = screen
                         if screen.new_element_ids or last.kind == "click":
+                            self._say(f"That did not help ({last_desc}): pressing Esc to undo")
                             self.actuator.press("esc")
                             screen = self.observe(prev=prev, after_seq=prev.seq)
                             stem = trace.screen(screen)
+                        else:
+                            self._say(f"That did not help ({last_desc}): trying something else")
                         last = last_desc = last_record = before = None
+                        if discards >= self.ask_after_discards:
+                            discards = 0
+                            take_answer(self._ask_human(
+                                f"I tried several things that did not help with '{goal}'. What should I do next?",
+                                deadline))  # fmt: skip
                         continue
                     last_record.outcome = last_record.outcome or "ok"
                     history.append(f"{last_desc} → ok")
+                    discards = 0
                 last = last_desc = last_record = before = None
 
                 action = decision.action
@@ -270,8 +375,10 @@ class Agent:
                     ms=decide_ms,
                 )
                 result.steps.append(rec)
-                self._emit({"type": "decision", "step": step, "action": desc, "confidence": action.confidence,
-                            "alternatives": action.alternatives, "element_id": action.element_id})  # fmt: skip
+                self._emit({"type": "decision", "step": step, "action": desc, "option": action.option,
+                            "confidence": action.confidence, "alternatives": action.alternatives,
+                            "element_id": action.element_id, "progress": decision.progress,
+                            "_screen": screen})  # fmt: skip
                 trace.highlight(stem, screen, action.element_id)
 
                 if action.kind == "done":
@@ -279,12 +386,28 @@ class Agent:
                     result.status, result.message = "done", "decision model reports the goal is achieved"
                     break
                 if action.kind == "stuck":
+                    answer = self._ask_human(
+                        f"I'm stuck: nothing on this screen seems to bring me closer to '{goal}'. "
+                        "Where should I go?",
+                        deadline,
+                    )
+                    if answer:
+                        rec.outcome = "asked the human"
+                        take_answer(answer)
+                        continue
+                    if self._cancel.is_set():
+                        rec.outcome = "cancelled while waiting for an answer"
+                        who = "the human" if self.inbox.cancelled else "caller"
+                        result.status, result.message = "cancelled", f"cancelled by {who}"
+                        break
                     rec.outcome = "gave up"
                     result.status, result.message = "stuck", "no visible element or scroll direction helps"
                     break
 
                 prev = screen
                 self.execute(action, screen, inputs)
+                absorb()  # a pause right after the action holds before the screen is judged
+                self._say("Looking at the screen")
                 screen = self.observe(prev=prev, after_seq=prev.seq)
                 stem = trace.screen(screen)
                 again = _click_only_closed_popup(prev, screen, action.element_id) if action.kind == "click" else None
@@ -295,6 +418,7 @@ class Agent:
                     screen = self.observe(prev=screen, after_seq=screen.seq)
                     stem = trace.screen(screen)
                     desc += " (first click only closed the open menu, clicked again)"
+                    self._say("The first click only closed the open menu: clicking again")
                     rec.action = desc
                 changed = screens_differ(prev.image, screen.image)
 
@@ -302,6 +426,7 @@ class Agent:
                     if not changed:
                         exhausted.add(action.direction or "")
                         rec.outcome = "no movement (end reached)"
+                        self._say(f"Nothing moved: the {action.direction} end is reached")
                         history.append(f"{desc} → nothing moved, end reached")
                         continue
                     exhausted.discard(_OPPOSITE.get(action.direction or "", ""))
@@ -313,6 +438,7 @@ class Agent:
                     if el:
                         tried.append(_Tried(el.label, el.bbox, prev.phash))
                     rec.outcome = "no visible effect"
+                    self._say(f"No visible effect ({desc})")
                     history.append(f"{desc} → no visible effect")
                     continue
                 if action.kind == "click":
@@ -331,7 +457,10 @@ class Agent:
             result.final_screen = self.last_screen.describe(3000)
         result.seconds = time.time() - t_start
         trace.result(result.to_json())
-        self._emit({"type": "run_end", "status": result.status, "message": result.message})
+        self._trace = None
+        self._emit({"type": "run_end", "status": result.status, "message": result.message,
+                    "steps": len(result.steps), "seconds": round(result.seconds, 1),
+                    "_result": result})  # fmt: skip
         return result
 
     def _emit(self, event: dict) -> None:

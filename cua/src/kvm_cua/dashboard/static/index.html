@@ -38,6 +38,13 @@
   .bar span.b { display: inline-block; height: 5px; background: var(--accent); border-radius: 3px; }
   pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; margin: 0; }
   .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .ev.muted { color: var(--muted); font-size: 12px; padding: 3px 0; }
+  .ev.human { border-left: 3px solid var(--accent); padding-left: 6px; }
+  .ev.desc { font-style: italic; }
+  .ask { display: none; margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: var(--chip); border: 1px solid var(--warn); }
+  .ask.on { display: block; }
+  #qr svg { width: 180px; height: 180px; display: block; margin: 4px 0 6px; }
+  a { color: var(--accent); word-break: break-all; }
 </style>
 </head>
 <body>
@@ -73,6 +80,19 @@
         <button id="observe">Observe</button>
         <button id="cancel">Cancel</button>
       </div>
+      <label for="guide">Tell the agent where to go (while it runs)</label>
+      <input id="guide" placeholder="e.g. open the Settings menu at the top right">
+      <div class="row">
+        <button id="tell">Tell</button>
+        <button id="pause">Pause</button>
+        <button id="resume">Resume</button>
+      </div>
+      <div class="ask" id="ask"></div>
+    </section>
+    <section id="rc" hidden>
+      <h2>Remote control</h2>
+      <div id="qr"></div>
+      <div class="meta" id="rcMeta"></div>
     </section>
     <section>
       <h2>Decisions</h2>
@@ -126,16 +146,50 @@ function refreshLive() {
 }
 setInterval(refreshLive, 2000);
 $("cancel").onclick = () => post("/dashboard/api/cancel");
+$("tell").onclick = async () => { const t = $("guide").value.trim(); if (!t) return; await post("/dashboard/api/guidance", { text: t }); $("guide").value = ""; };
+$("guide").onkeydown = (e) => { if (e.key === "Enter") $("tell").onclick(); };
+$("pause").onclick = () => post("/dashboard/api/pause");
+$("resume").onclick = () => post("/dashboard/api/resume");
+
+function renderAsk(events, running) {
+  let ask = null;
+  for (const e of events) { if (e.type === "ask_human") ask = e; else if (e.type === "ask_human_end" || e.type === "run_start") ask = null; }
+  $("ask").className = "ask" + (ask && running ? " on" : "");
+  if (ask) $("ask").innerHTML = `<b>The agent asks:</b> ${escapeHtml(ask.question)}<div class="meta">Answer above with Tell (waits up to ${ask.wait_s} s).</div>`;
+}
+let lastQr = "";
+function renderNarration(n) {
+  $("rc").hidden = !n || !n.enabled;
+  if (!n || !n.enabled) return;
+  if (n.qrSvg !== lastQr) { $("qr").innerHTML = n.qrSvg || ""; lastQr = n.qrSvg; }
+  const parts = [`session: <b>${escapeHtml(n.status)}</b>`];
+  if (n.remoteControlUrl) parts.push(`<a href="${escapeHtml(n.remoteControlUrl)}" target="_blank" rel="noopener">remote control link</a>`);
+  if (n.uiUrl) parts.push(`<a href="${escapeHtml(n.uiUrl)}" target="_blank" rel="noopener">LeanScope session</a>`);
+  if (n.failures) parts.push(`${n.failures} narration write(s) failed`);
+  if (n.error) parts.push(`<span style="color:var(--bad)">${escapeHtml(n.error)}</span>`);
+  parts.push(`worker dispatcher for the choreo: <code>${escapeHtml(n.workerDispatchUrl || "")}</code>`);
+  $("rcMeta").innerHTML = parts.join("<br>");
+}
 
 function renderEvents(events) {
   const log = $("log");
-  const items = events.filter(e => ["decision", "run_start", "run_end"].includes(e.type)).slice(-40).reverse();
+  const shown = ["decision", "run_start", "run_end", "screen_description", "activity", "guidance_received",
+                 "paused", "resumed", "cancel_requested", "ask_human"];
+  const items = events.filter(e => shown.includes(e.type)).slice(-60).reverse();
   log.innerHTML = "";
   for (const e of items) {
-    const d = document.createElement("div"); d.className = "ev";
+    const d = document.createElement("div");
+    d.className = "ev" + ({ activity: " muted", screen_description: " desc", guidance_received: " human", paused: " human",
+                            resumed: " human", cancel_requested: " human", ask_human: " human" }[e.type] || "");
     const t = new Date(e.ts * 1000).toLocaleTimeString();
     let html = `<span class="t">${t}</span>`;
     if (e.type === "run_start") html += `<b>start</b> ${escapeHtml(e.goal)}`;
+    else if (e.type === "activity") html += escapeHtml(e.text);
+    else if (e.type === "screen_description") html += `screen: ${escapeHtml(e.text)}`;
+    else if (e.type === "guidance_received") html += `<b>you:</b> ${escapeHtml(e.text)}`;
+    else if (e.type === "paused" || e.type === "resumed") html += `<b>${e.type}</b>`;
+    else if (e.type === "cancel_requested") html += `<b>cancel requested</b>`;
+    else if (e.type === "ask_human") html += `<b>asks:</b> ${escapeHtml(e.question)}`;
     else if (e.type === "run_end") html += `<b>${escapeHtml(e.status)}</b> ${escapeHtml(e.message || "")}`;
     else {
       html += escapeHtml(e.action) + (e.confidence != null ? ` <span class="t">(${(e.confidence * 100).toFixed(0)}%)</span>` : "");
@@ -163,8 +217,11 @@ async function tick() {
       $("screenMeta").textContent = parsedMeta;
     }
     renderEvents(s.events || []);
+    renderAsk(s.events || [], s.running);
+    renderNarration(s.narration);
     if (res) $("result").textContent = `${res.status}: ${res.message}\n` + (res.steps || []).map(x => `${x.step}. ${x.action} → ${x.outcome}`).join("\n");
     $("run").disabled = s.running;
+    for (const id of ["tell", "pause", "resume"]) $(id).disabled = !s.running;
   } catch (e) { /* server restarting */ }
   setTimeout(tick, 1000);
 }

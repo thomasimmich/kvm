@@ -42,6 +42,36 @@ class Settings(BaseSettings):
     # Dashboard
     cua_dashboard_port: int = 8766
 
+    # Human steering: when stuck, ask the human (dashboard or remote control) and wait this long
+    cua_human_wait_s: float = 45.0
+
+    # Rough screen description (fast image-to-text model, runs next to OmniParser)
+    cua_vision_provider: Literal["openai", "none"] = "openai"  # openai = any OpenAI-compatible API
+    cua_vision_model: str = "gpt-4.1-mini"
+    cua_vision_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: str = ""
+
+    # Live narration into a LeanScope agent-server session (off while these are empty)
+    leanscope_agent_server_url: str = ""
+    leanscope_api_token: str = ""
+    leanscope_repository_id: str = ""
+    leanscope_choreo_scenario_guid: str = ""
+    leanscope_session_repository_id: str = ""
+    leanscope_remote_control_url: str = ""  # the remote control app; the QR code links here
+    cua_public_url: str = ""  # how the agent server reaches this service (the choreo's Worker dispatcher)
+    cua_worker_key: str = ""  # ?key=… the dispatcher URL must carry
+    cua_dispatch_timeout_s: float = 20.0
+
+    @property
+    def narration_enabled(self) -> bool:
+        return bool(self.leanscope_agent_server_url and self.leanscope_repository_id
+                    and self.leanscope_choreo_scenario_guid)  # fmt: skip
+
+    @property
+    def worker_dispatch_url(self) -> str:
+        base = (self.cua_public_url or f"http://{self.cua_mcp_host}:{self.cua_mcp_port}").rstrip("/")
+        return base + "/worker/dispatch" + (f"?key={self.cua_worker_key}" if self.cua_worker_key else "")
+
 
 @lru_cache
 def get_settings() -> Settings:

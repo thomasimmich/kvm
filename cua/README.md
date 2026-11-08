@@ -124,6 +124,27 @@ the step prompt automatically.
 
 See [docs/agent-server-integration.md](docs/agent-server-integration.md) for connecting a choreo.
 
+## Following and steering a run
+
+- **Steering:** while a run is going, a human can tell the agent where to go, pause it, resume
+  it or cancel it. On the dashboard that is the "Tell the agent" field and its buttons; from
+  LeanScope it is the remote control (below).
+  - Guidance goes into Jev's state as `HUMAN GUIDANCE` with the highest priority.
+  - When Jev gives up, or after three discarded attempts in a row, the agent asks the human
+    and waits up to `CUA_HUMAN_WAIT_S` seconds for an answer. It only waits when someone can
+    answer: a dashboard run or a narrated session.
+- **Rough screen description:** with `OPENAI_API_KEY` set, a fast vision model
+  (`CUA_VISION_MODEL`) describes each new view in two or three sentences. It runs next to
+  OmniParser and never delays a decision.
+- **Live narration:** set the `LEANSCOPE_*` variables, and every run starts its own LeanScope
+  session of the narration choreo. The CUA writes into that session's activity:
+  - the screenshot and its description
+  - the annotated screenshot with the element list
+  - every decision and every micro step
+  The dashboard shows a QR code for the remote control app. The flow, the activity tags and
+  the command format are in
+  [docs/agent-server-integration.md](docs/agent-server-integration.md#5-live-narration-and-remote-control).
+
 ## Performance (M3 Pro, 1920×1280 screen)
 
 | Stage | Time |
@@ -146,7 +167,10 @@ See [docs/agent-server-integration.md](docs/agent-server-integration.md) for con
 | `perception/screen.py` | Change detection and new-element detection |
 | `decision/jev.py`, `decision/decider.py` | Jev client (a port of the agent server's) and the option/state building |
 | `agent/loop.py` | The loop, including discard/undo, scroll bookkeeping and the time budget |
-| `mcp_server.py` | MCP tools, the prompt, the dashboard routes and bearer auth |
+| `agent/inbox.py` | Human commands for a running loop: guidance, answer, pause, resume, cancel |
+| `narration/vision.py` | Rough screen description (OpenAI-compatible image-to-text) |
+| `narration/agent_server.py`, `narration/session.py`, `narration/publisher.py` | One LeanScope session per run: run-choreo, worker dispatch, activity narration |
+| `mcp_server.py` | MCP tools, the prompt, the dashboard routes, `/worker/dispatch` and bearer auth |
 
 Tests: `uv run pytest`. On the firmware side: `go test ./internal/cuaapi/`, which runs on any host.
 `cua_api_test.go` runs on the device with `./dev_deploy.sh -r <ip> --run-go-tests`.

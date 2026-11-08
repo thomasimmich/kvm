@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             print(screen_text(scr))
     elif args.cmd == "run":
-        res = svc.run_goal(args.goal, args.hint, _kv(args.input), args.max_steps, args.expect)
+        res = svc.run_goal(args.goal, args.hint, _kv(args.input), args.max_steps, args.expect, source="cli")
         print(res.summary())
         sys.exit(0 if res.status == "done" else 1)
     elif args.cmd == "click":

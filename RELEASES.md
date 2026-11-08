@@ -1,5 +1,28 @@
 # Release notes
 
+## CUA 0.2.0: follow and steer a run live (2026-11-08)
+
+**`cua/` service**
+- **Steering:** guidance, pause, resume and cancel reach a running loop.
+  - Guidance goes into Jev's state as `HUMAN GUIDANCE`, with the highest priority.
+  - When Jev gives up, or after three discarded attempts in a row, the agent asks the human and
+    waits up to `CUA_HUMAN_WAIT_S` for an answer. It only waits when someone can answer.
+  - The dashboard has a "Tell the agent" field with Pause and Resume.
+- **Rough screen description:** a fast vision model (OpenAI-compatible, `gpt-4.1-mini` by
+  default) describes each new view, next to OmniParser and without delaying decisions.
+- **Live narration into LeanScope:** with the `LEANSCOPE_*` variables set, every run starts
+  its own agent-server session of the narration choreo (run-choreo plugin route). The CUA is
+  that choreo's 🦾 Worker (`/worker/dispatch`). It writes into the worker step's activity:
+  - screenshots
+  - descriptions
+  - annotated screens with element lists
+  - decisions and micro steps
+
+  Each entry starts with a tag. Answers to the choreo's guidance need come back as commands.
+- **Dashboard:** a "Remote control" panel with a QR code (agent-server URL plus session token)
+  for the remote control app. The log also shows descriptions, micro steps and human input.
+- `cua_run_goal` returns the live session link.
+
 ## CUA 0.1.0: the KVM becomes a computer-using agent (2026-11-07)
 
 **Firmware (device side)**

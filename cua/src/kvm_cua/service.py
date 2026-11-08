@@ -14,12 +14,17 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .agent.inbox import Command
 from .agent.loop import Agent, RunResult, find_element
 from .config import Settings
 from .decision.decider import Decider, JevDecider, StubDecider
 from .decision.jev import JevClient
 from .kvm.actuation import Actuator
 from .kvm.device import HttpKvm, KvmDevice
+from .narration.agent_server import AgentServerClient
+from .narration.publisher import NarrationPublisher
+from .narration.session import NarrationSessions
+from .narration.vision import make_describer
 from .perception.annotate import annotate
 from .perception.parser import UIParser, make_parser
 from .perception.types import Screen
@@ -53,6 +58,18 @@ class CuaService:
         self._agent: Agent | None = None
         self._init_lock = threading.Lock()
         self.live = LiveState()
+        self._publisher: NarrationPublisher | None = None
+        self.narration: NarrationSessions | None = None
+        if settings.narration_enabled:
+            self.narration = NarrationSessions(
+                AgentServerClient(settings.leanscope_agent_server_url, settings.leanscope_api_token),
+                settings.leanscope_repository_id,
+                settings.leanscope_choreo_scenario_guid,
+                settings.leanscope_session_repository_id or None,
+                settings.leanscope_remote_control_url,
+                settings.cua_dispatch_timeout_s,
+            )
+            self.narration.on_command = self.command
 
     # --- lazy wiring -----------------------------------------------------------
 
@@ -95,11 +112,18 @@ class CuaService:
                 Actuator(self.device, layout=s.kvm_keyboard_layout),
                 runs_dir=s.cua_runs_dir,
                 on_event=self._on_event,
+                describer=make_describer(
+                    s.cua_vision_provider, s.openai_api_key, s.cua_vision_model, s.cua_vision_base_url
+                ),
             )
         return self._agent
 
     def _on_event(self, ev: dict) -> None:
-        self.live.events.append(ev)
+        pub = self._publisher
+        if pub is not None:
+            pub(ev)
+        # keys starting with "_" hold images and objects for the publisher, not JSON for the dashboard
+        self.live.events.append({k: v for k, v in ev.items() if not k.startswith("_")})
         if ev.get("type") == "decision":
             self.live.highlight = ev.get("element_id")
         elif ev.get("type") == "screen":
@@ -115,16 +139,40 @@ class CuaService:
         max_steps: int | None = None,
         expect_text=None,
         time_budget_s=None,
+        source: Literal["mcp", "dashboard", "cli"] = "mcp",
     ) -> RunResult:
+        """source: who started the run. A dashboard user can answer when the CUA is stuck, so it waits
+        for them; an MCP caller alone can't, so it only waits when a narration session is live."""
         self.live.goal, self.live.running = goal, True
+        steps = max_steps or self.settings.cua_max_steps
+        agent = self.agent
+        run = None
+        t0 = time.time()
         try:
-            res = self.agent.run_goal(
-                goal, hints, inputs, max_steps or self.settings.cua_max_steps, expect_text, time_budget_s
-            )
+            if self.narration is not None:
+                run = self.narration.begin(goal, list(hints or []), list((inputs or {}).keys()), steps)
+                self._publisher = run.publisher
+                if time_budget_s is not None:  # starting the session took part of the caller's time
+                    time_budget_s = max(10.0, time_budget_s - (time.time() - t0))
+            watched = source == "dashboard" or self._publisher is not None
+            agent.human_wait_s = self.settings.cua_human_wait_s if watched else 0.0
+            res = agent.run_goal(goal, hints, inputs, steps, expect_text, time_budget_s)
+            if run is not None and run.handle is not None:
+                res.session_url = run.handle.ui_url
             self.live.last_result = res.to_json()
             return res
         finally:
+            self._publisher = None
+            if run is not None:
+                self.narration.end(run)  # type: ignore[union-attr]
             self.live.running = False
+
+    def command(self, cmd: Command) -> bool:
+        """Guidance, an answer, pause, resume or cancel for the running loop."""
+        if self._agent is None or not self.live.running:
+            return False
+        self._agent.command(cmd)
+        return True
 
     def observe(self) -> Screen:
         with self.agent.lock:

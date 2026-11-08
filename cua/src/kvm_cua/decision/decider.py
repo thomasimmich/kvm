@@ -61,6 +61,7 @@ class DecisionContext:
     exhausted_scroll: set[str] = field(default_factory=set)
     last_action: str | None = None  # set → also ask the progress question
     before: Screen | None = None
+    guidance: list[str] = field(default_factory=list)  # what a human said during the run, oldest first
 
 
 @dataclass
@@ -141,6 +142,11 @@ def parse_option(option: str, probs: dict[str, float] | None = None, confidence:
 
 def build_state(ctx: DecisionContext, max_screen_chars: int = 24000) -> str:
     parts = [f"GOAL: {ctx.goal}"]
+    if ctx.guidance:
+        parts.append(
+            "HUMAN GUIDANCE (latest first, highest priority — follow it over the hints):\n"
+            + "\n".join(f"- {g}" for g in reversed(ctx.guidance[-5:]))
+        )
     if ctx.hints:
         parts.append("HINTS:\n" + "\n".join(f"- {h}" for h in ctx.hints))
     if ctx.inputs:
@@ -170,6 +176,7 @@ NEXT_INSTRUCTIONS = (
     "Pick the single next action that makes the most progress toward the GOAL on the CURRENT SCREEN. "
     "Prefer elements whose label matches the goal or the hints; follow the hints' advice about the application. "
     "Do not repeat actions that already failed. Choose 'done' only when the goal is visibly achieved. "
+    "When there is HUMAN GUIDANCE, the person watching knows the way: do what its latest line says. "
     "Once the app the goal needs is open, prefer elements inside its window: the app's name in the menu bar "
     "only opens a menu with About, Hide and Quit."
 )
@@ -227,8 +234,15 @@ class StubDecider:
         for name in ctx.inputs:
             if f"type input '{name}'" not in typed and ctx.history and ctx.history[-1].startswith("click"):
                 return Decision(Action("type", f"type_{name}", input_name=name), progress)
+        history = " | ".join(h for h in ctx.history if not h.startswith("human"))
+        if ctx.guidance and ctx.history and ctx.history[-1].startswith("human"):
+            # guidance that just arrived beats the goal's keywords (once)
+            gg = _tokens(ctx.guidance[-1])
+            hits = [e for e in ctx.screen.elements if e.id not in ctx.excluded and relevance(e, gg) > 0]
+            if hits:
+                e = max(hits, key=lambda e: relevance(e, gg))
+                return Decision(Action("click", f"el_{e.id}", element_id=e.id), progress)
         gt = _tokens(" ".join([ctx.goal, *ctx.hints]))
-        history = " | ".join(ctx.history)
         best, best_score = None, 0.0
         for e in ctx.screen.elements:
             if e.id in ctx.excluded or f"'{e.label}'" in history:

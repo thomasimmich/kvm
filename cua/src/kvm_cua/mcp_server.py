@@ -5,7 +5,9 @@ string and shows images only as "[image/png]". The CUA background knowledge is
 served as the prompt `additional_agent_instructions`, which the agent server
 appends to the step prompt automatically.
 
-The same process also serves a small live dashboard under /dashboard.
+The same process also serves a small live dashboard under /dashboard, and
+/worker/dispatch, which the agent server calls when the narration choreo's
+🦾 Worker fires (see narration/session.py).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .agent.inbox import Command, parse_command
 from .service import CuaService, screen_text
 
 log = logging.getLogger(__name__)
@@ -142,7 +145,14 @@ def build_server(service: CuaService) -> MCPServer:
                 "elements": [e.to_json() for e in scr.elements], "newIds": scr.new_element_ids,
             },
             "decider": service.settings.typesafe_api_key and "jev" or "stub",
+            "describer": "vision" if service._agent and service._agent.describer else "off",
+            "narration": narration_state(),
         })  # fmt: skip
+
+    def narration_state() -> dict:
+        if service.narration is None:
+            return {"enabled": False}
+        return {**service.narration.state(), "workerDispatchUrl": service.settings.worker_dispatch_url}
 
     @mcp.custom_route("/dashboard/api/screen.jpg", methods=["GET"])
     async def dashboard_screen(_: Request) -> Response:
@@ -188,15 +198,57 @@ def build_server(service: CuaService) -> MCPServer:
             target=service.run_goal,
             args=(goal, body.get("hints") or [], body.get("inputs") or {}, body.get("maxSteps"),
                   body.get("expectText") or None),
+            kwargs={"source": "dashboard"},
             daemon=True,
         ).start()  # fmt: skip
         return JSONResponse({"ok": True})
 
     @mcp.custom_route("/dashboard/api/cancel", methods=["POST"])
     async def dashboard_cancel(_: Request) -> Response:
-        if service._agent:
+        if not service.command(Command("cancel")) and service._agent:
             service._agent.cancel()
         return JSONResponse({"ok": True})
+
+    async def steer(cmd: Command | None) -> Response:
+        if cmd is None:
+            return JSONResponse({"ok": False, "error": "say what the agent should do"}, status_code=400)
+        if not service.command(cmd):
+            return JSONResponse({"ok": False, "error": "no run in progress"}, status_code=409)
+        return JSONResponse({"ok": True})
+
+    @mcp.custom_route("/dashboard/api/guidance", methods=["POST"])
+    async def dashboard_guidance(request: Request) -> Response:
+        """{text} or {command, text}: tells the running loop where to go (keywords like 'pause' work too)."""
+        return await steer(parse_command(await request.json()))
+
+    @mcp.custom_route("/dashboard/api/pause", methods=["POST"])
+    async def dashboard_pause(_: Request) -> Response:
+        return await steer(Command("pause"))
+
+    @mcp.custom_route("/dashboard/api/resume", methods=["POST"])
+    async def dashboard_resume(_: Request) -> Response:
+        return await steer(Command("resume"))
+
+    # --- the narration choreo's worker -------------------------------------------
+
+    @mcp.custom_route("/worker/dispatch", methods=["POST"])
+    async def worker_dispatch(request: Request) -> Response:
+        """Called by the agent server: once when the run's worker step starts (answer 202, the run
+        reports into the activity), and on every answer to the guidance need (a command)."""
+        key = service.settings.cua_worker_key
+        if key:
+            if not hmac.compare_digest(request.query_params.get("key", "").encode(), key.encode()):
+                return JSONResponse({"error": "wrong or missing ?key="}, status_code=401)
+        elif not _is_loopback(request.client.host if request.client else ""):
+            return JSONResponse({"error": "set CUA_WORKER_KEY to accept remote dispatches"}, status_code=401)
+        if service.narration is None:
+            return JSONResponse({"error": "narration is off: set the LEANSCOPE_* variables"}, status_code=503)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "expected a JSON worker body"}, status_code=400)
+        status, payload = await blocking(service.narration.on_dispatch, body)
+        return JSONResponse(payload, status_code=status)
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(_: Request) -> Response:
@@ -222,7 +274,7 @@ class BearerAuth:
             return await self.app(scope, receive, send)
         req = Request(scope)
         path = req.url.path
-        if path == "/healthz":
+        if path == "/healthz" or path.startswith("/worker/"):  # /worker/* checks CUA_WORKER_KEY itself
             return await self.app(scope, receive, send)
         given = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
         if path.startswith("/dashboard"):

@@ -1,6 +1,6 @@
 [project]
 name = "kvm-cua"
-version = "0.1.0"
+version = "0.2.0"
 description = "Computer-using agent that drives a remote machine through a JetKVM (screen parsing + TypeSafe Jev decisions + human-like HID input)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -11,6 +11,7 @@ dependencies = [
     "pillow>=11",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    "segno>=1.6.6",
     "uvicorn>=0.32",
 ]
 
