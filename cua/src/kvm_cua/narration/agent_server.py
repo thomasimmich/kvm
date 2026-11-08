@@ -10,6 +10,7 @@ Everything is REST with the session token or the activity URL; no GraphQL.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
@@ -32,10 +33,10 @@ class AgentServerError(RuntimeError):
 
 
 class AgentServerClient:
-    def __init__(self, base_url: str, api_token: str = "", timeout_s: float = 15.0,
+    def __init__(self, base_url: str, token_provider: Callable[[], str] | None = None, timeout_s: float = 15.0,
                  client: httpx.Client | None = None):  # fmt: skip
         self.base_url = base_url.rstrip("/") + "/"
-        self.api_token = api_token
+        self.token_provider = token_provider  # the LeanScope login JWT, fresh on every call
         self.client = client or httpx.Client(timeout=timeout_s)
 
     def _url(self, path: str) -> str:
@@ -47,7 +48,8 @@ class AgentServerClient:
 
     def _check(self, r: httpx.Response, what: str) -> httpx.Response:
         if r.status_code >= 400:
-            raise AgentServerError(f"{what}: HTTP {r.status_code} {r.text[:300]}")
+            hint = " (log in to LeanScope again in the CUA dashboard)" if r.status_code in (401, 403) else ""
+            raise AgentServerError(f"{what}: HTTP {r.status_code}{hint} {r.text[:300]}")
         return r
 
     # --- session ---------------------------------------------------------------
@@ -57,7 +59,8 @@ class AgentServerClient:
         body: dict = {**(initial_input or {}), "repositoryId": repository_id, "scenarioGuid": scenario_guid}
         if session_repository_id:
             body["sessionRepositoryId"] = session_repository_id
-        headers = {"Authorization": f"Bearer {self.api_token}"} if self.api_token else {}
+        token = self.token_provider() if self.token_provider else ""
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         r = self._check(
             self.client.post(self._url("/api/v1/plugins/run-choreo"), json=body, headers=headers),
             "run-choreo",

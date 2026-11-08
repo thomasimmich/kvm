@@ -2,8 +2,9 @@
 
 How a run is narrated:
 
-1. `begin()` starts a session of the narration choreo (LEANSCOPE_CHOREO_SCENARIO_GUID in
-   LEANSCOPE_REPOSITORY_ID) through the run-choreo plugin route and opens its start gate.
+1. `begin()` starts a session of the choreo picked in the dashboard (`LeanScopeAuth`, after the
+   LeanScope login) through the run-choreo plugin route and opens its start gate. Without a login
+   or a picked choreo the run goes ahead unnarrated (status `not_configured`).
 2. The choreo's step with the 🦾 Worker fires: the engine creates the worker step and its
    activity and POSTs the worker body to `CUA_PUBLIC_URL/worker/dispatch`. `on_dispatch()`
    matches it to the waiting run by session token and answers 202 at once
@@ -26,6 +27,7 @@ from urllib.parse import urlencode
 
 from ..agent.inbox import Command, parse_command
 from .agent_server import AgentServerClient, SessionHandle
+from .leanscope_auth import LeanScopeAuth
 from .publisher import NarrationPublisher
 
 log = logging.getLogger(__name__)
@@ -35,7 +37,7 @@ log = logging.getLogger(__name__)
 class NarrationRun:
     goal: str
     handle: SessionHandle | None = None
-    status: str = "starting"  # starting | waiting | running | settled | no_dispatch | failed
+    status: str = "starting"  # starting | waiting | running | settled | no_dispatch | failed | not_configured
     error: str = ""
     activity_url: str = ""
     agent_server_url: str = ""
@@ -52,16 +54,12 @@ class NarrationSessions:
     def __init__(
         self,
         client: AgentServerClient,
-        repository_id: int | str,
-        choreo_scenario_guid: str,
-        session_repository_id: int | str | None = None,
+        auth: LeanScopeAuth,
         remote_control_url: str = "",
         dispatch_timeout_s: float = 20.0,
     ):
         self.client = client
-        self.repository_id = repository_id
-        self.choreo_scenario_guid = choreo_scenario_guid
-        self.session_repository_id = session_repository_id
+        self.auth = auth  # login and the choice of choreo (set in the dashboard)
         self.remote_control_url = remote_control_url
         self.dispatch_timeout_s = dispatch_timeout_s
         self.current: NarrationRun | None = None
@@ -74,13 +72,21 @@ class NarrationSessions:
         goes ahead unnarrated, and the reason is on the returned run (and the dashboard)."""
         run = NarrationRun(goal)
         self.current = run
+        sel = self.auth.selection
+        if not self.auth.logged_in or not sel.complete:
+            run.status = "not_configured"
+            run.error = ("not logged in to LeanScope" if not self.auth.logged_in else "no choreo picked") + (
+                ": the run goes ahead without a LeanScope session (log in and pick a choreo in the dashboard)"
+            )
+            log.info("narration: %s", run.error)
+            return run
         try:
             # input values can be secrets (passwords to type): only their names leave the CUA
             run.handle = self.client.run_choreo(
-                self.repository_id,
-                self.choreo_scenario_guid,
+                sel.repository_id,
+                sel.scenario_guid,
                 {"goal": goal, "hints": hints, "inputNames": input_names},
-                self.session_repository_id,
+                sel.session_repository_id or None,
             )
             run.status = "waiting"
             self.client.start(run.session_token)
@@ -169,12 +175,18 @@ class NarrationSessions:
         )
 
     def state(self) -> dict[str, Any]:
+        login = {
+            "enabled": True,
+            "loggedIn": self.auth.logged_in,
+            "email": self.auth.email,
+            "selection": self.auth.selection.to_json(),
+        }
         run = self.current
         if run is None:
-            return {"enabled": True, "status": "idle"}
+            return {**login, "status": "idle"}
         link = self.remote_control_link(run)
         return {
-            "enabled": True,
+            **login,
             "status": run.status,
             "error": run.error,
             "goal": run.goal,

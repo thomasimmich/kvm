@@ -25,7 +25,7 @@
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
   #shot { width: 100%; height: auto; display: block; border-radius: 4px; background: #000; min-height: 120px; }
   label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
-  input, textarea { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  input, textarea, select { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
   textarea { min-height: 54px; resize: vertical; }
   .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
   button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font: inherit; }
@@ -65,6 +65,27 @@
     <div class="meta" id="screenMeta">connecting to the KVM …</div>
   </section>
   <div style="display:grid; gap:12px; align-content:start; min-width:0">
+    <section id="ls" hidden>
+      <h2>LeanScope</h2>
+      <form id="lsLogin" hidden>
+        <div class="meta">Log in to LeanScope to pick a choreo: it fills in the goal and narrates runs into a session.</div>
+        <label for="lsEmail">LeanScope email</label>
+        <input id="lsEmail" type="email" autocomplete="username">
+        <label for="lsPassword">Password</label>
+        <input id="lsPassword" type="password" autocomplete="current-password">
+        <div class="row"><button class="primary" id="lsLoginBtn" type="submit">Log in</button></div>
+      </form>
+      <div id="lsPick" hidden>
+        <div class="meta">Logged in as <b id="lsEmailShown"></b> · <a href="#" id="lsLogout">log out</a></div>
+        <label for="lsRepo">Choreo repository</label>
+        <select id="lsRepo"></select>
+        <label for="lsChoreo">Choreo</label>
+        <select id="lsChoreo"></select>
+        <label for="lsSessionRepo">Record sessions in</label>
+        <select id="lsSessionRepo"></select>
+        <div class="meta" id="lsHint"></div>
+      </div>
+    </section>
     <section>
       <h2>Goal</h2>
       <label for="goal">Goal</label>
@@ -125,24 +146,35 @@ $("run").onclick = () => { setMode("parsed"); return post("/dashboard/api/run", 
 $("observe").onclick = () => { setMode("parsed"); post("/dashboard/api/observe"); };
 
 // Live: the raw screen every 2 s. Parsed: the last parsed screen with numbered element boxes.
-let mode = "live", liveBusy = false, parsedMeta = "";
+let mode = "live", liveBusy = false, parsedMeta = "", liveFailing = false, liveNext = 0;
 function setMode(m) {
   mode = m;
   $("modeLive").className = m === "live" ? "primary" : "";
   $("modeParsed").className = m === "parsed" ? "primary" : "";
   lastSeq = null;  // force a reload of the parsed image
-  if (m === "live") refreshLive();
+  if (m === "live") refreshLive(true);
   else $("screenMeta").textContent = parsedMeta || "no parsed screen yet: press Observe";
 }
 $("modeLive").onclick = () => setMode("live");
 $("modeParsed").onclick = () => setMode("parsed");
-function refreshLive() {
-  if (mode !== "live" || liveBusy) return;
+// While the screen is unavailable (e.g. no HDMI signal) it polls every 10 s instead of every 2 s.
+async function refreshLive(force) {
+  if (mode !== "live" || liveBusy || (!force && Date.now() < liveNext)) return;
   liveBusy = true;
-  const img = new Image();
-  img.onload = () => { liveBusy = false; if (mode === "live") { $("shot").src = img.src; $("screenMeta").textContent = "live · " + new Date().toLocaleTimeString(); } };
-  img.onerror = () => { liveBusy = false; if (mode === "live") $("screenMeta").textContent = "live view unavailable (is the KVM reachable and npm run deploy running?)"; };
-  img.src = "/dashboard/api/live.jpg?" + Date.now();
+  let err = "";
+  try {
+    const r = await fetch("/dashboard/api/live.jpg?" + Date.now());
+    if (r.ok) {
+      const url = URL.createObjectURL(await r.blob());
+      const old = $("shot").src;
+      if (mode === "live") { $("shot").src = url; $("screenMeta").textContent = "live · " + new Date().toLocaleTimeString(); }
+      if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+    } else err = (await r.text()).trim() || ("HTTP " + r.status);
+  } catch (e) { err = "the CUA service is not reachable"; }
+  liveBusy = false;
+  liveFailing = !!err;
+  liveNext = Date.now() + (err ? 10000 : 0);
+  if (err && mode === "live") $("screenMeta").textContent = "live view unavailable: " + err + " · retrying every 10 s";
 }
 setInterval(refreshLive, 2000);
 $("cancel").onclick = () => post("/dashboard/api/cancel");
@@ -157,10 +189,85 @@ function renderAsk(events, running) {
   $("ask").className = "ask" + (ask && running ? " on" : "");
   if (ask) $("ask").innerHTML = `<b>The agent asks:</b> ${escapeHtml(ask.question)}<div class="meta">Answer above with Tell (waits up to ${ask.wait_s} s).</div>`;
 }
-let lastQr = "";
+// LeanScope login and the choice of choreo. Rebuilt only when the login changes, not on every poll.
+async function api(path, body) {
+  const init = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, init);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.error || ("HTTP " + r.status));
+  return j.result;
+}
+function fillSelect(sel, items, value, placeholder) {
+  sel.innerHTML = "";
+  for (const [v, text] of [["", placeholder], ...items]) {
+    const o = document.createElement("option"); o.value = v; o.textContent = text; sel.appendChild(o);
+  }
+  sel.value = items.some(([v]) => v === value) ? value : "";
+}
+const repoLabel = (r) => (r.groupName ? r.groupName + " / " : "") + r.name + (r.account ? " (my account repository)" : "");
+function hint(text, bad) { $("lsHint").innerHTML = bad ? `<span style="color:var(--bad)">${escapeHtml(text)}</span>` : escapeHtml(text); }
+let choreos = [];  // of the picked repository: {guid, title, goal, hints}
+async function loadRepos(sel) {
+  hint("loading repositories …");
+  let repos;
+  try { repos = await api("/dashboard/api/leanscope/repositories"); } catch (e) { hint(e.message, true); return; }
+  const items = repos.map(r => [r.id, repoLabel(r)]);
+  fillSelect($("lsRepo"), items, sel.repositoryId, "— pick a repository —");
+  fillSelect($("lsSessionRepo"), items.filter(([id]) => !repos.find(r => r.id === id).account), sel.sessionRepositoryId, "My account repository (default)");
+  hint("");
+  await loadChoreos($("lsRepo").value, sel.scenarioGuid);
+}
+async function loadChoreos(repoId, guid) {
+  const c = $("lsChoreo");
+  choreos = [];
+  if (!repoId) { fillSelect(c, [], "", "— pick a repository first —"); return; }
+  fillSelect(c, [], "", "loading …"); c.disabled = true;
+  try {
+    choreos = await api("/dashboard/api/leanscope/choreos?repositoryId=" + encodeURIComponent(repoId));
+    fillSelect(c, choreos.map(x => [x.guid, x.title]), guid, choreos.length ? "— pick a choreo —" : "— no choreos —");
+    hint(choreos.length ? "" : "This repository has no scenario of type Choreo. Set the scenario's type to Choreo in LeanScope.");
+  } catch (e) { fillSelect(c, [], "", "—"); hint(e.message, true); }
+  c.disabled = false;
+}
+// The picked choreo's goal (personaGoal) and hints (preconditions) go into the goal fields; still editable.
+function prefillGoal() {
+  const c = choreos.find(x => x.guid === $("lsChoreo").value);
+  if (!c) return;
+  if (c.goal) $("goal").value = c.goal;
+  if (c.hints && c.hints.length) $("hints").value = c.hints.join("\n");
+}
+async function saveSelection() {
+  const o = $("lsChoreo").selectedOptions[0];
+  try {
+    await api("/dashboard/api/leanscope/selection", {
+      repositoryId: $("lsRepo").value, scenarioGuid: $("lsChoreo").value,
+      scenarioTitle: o && o.value ? o.textContent : "", sessionRepositoryId: $("lsSessionRepo").value,
+    });
+  } catch (e) { hint(e.message, true); }
+}
+$("lsRepo").onchange = async () => { await loadChoreos($("lsRepo").value, ""); saveSelection(); };
+$("lsChoreo").onchange = () => { prefillGoal(); saveSelection(); };
+$("lsSessionRepo").onchange = saveSelection;
+$("lsLogin").onsubmit = async (ev) => {
+  ev.preventDefault();
+  $("lsLoginBtn").disabled = true;
+  try { await api("/dashboard/api/leanscope/login", { email: $("lsEmail").value, password: $("lsPassword").value }); $("lsPassword").value = ""; lsLoggedIn = null; }
+  catch (e) { alert(e.message); }
+  $("lsLoginBtn").disabled = false;
+};
+$("lsLogout").onclick = async (ev) => { ev.preventDefault(); try { await api("/dashboard/api/leanscope/logout", {}); lsLoggedIn = null; } catch (e) { alert(e.message); } };
+
+let lastQr = "", lsLoggedIn = null;
 function renderNarration(n) {
-  $("rc").hidden = !n || !n.enabled;
+  $("rc").hidden = $("ls").hidden = !n || !n.enabled;
   if (!n || !n.enabled) return;
+  if (n.loggedIn !== lsLoggedIn) {
+    lsLoggedIn = n.loggedIn;
+    $("lsLogin").hidden = !!n.loggedIn;
+    $("lsPick").hidden = !n.loggedIn;
+    if (n.loggedIn) { $("lsEmailShown").textContent = n.email || ""; loadRepos(n.selection || {}); }
+    else if (n.email && !$("lsEmail").value) $("lsEmail").value = n.email;
+  }
   if (n.qrSvg !== lastQr) { $("qr").innerHTML = n.qrSvg || ""; lastQr = n.qrSvg; }
   const parts = [`session: <b>${escapeHtml(n.status)}</b>`];
   if (n.remoteControlUrl) parts.push(`<a href="${escapeHtml(n.remoteControlUrl)}" target="_blank" rel="noopener">remote control link</a>`);

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import random
 
+import httpx
+import pytest
 from PIL import Image
 
 from kvm_cua.kvm.actuation import Actuator, MotionProfile, human_path
 from kvm_cua.kvm.decode import decode_last_frame
-from kvm_cua.kvm.device import ABS_MAX, FakeKvm
+from kvm_cua.kvm.device import ABS_MAX, FakeKvm, HttpKvm, KvmError
 from kvm_cua.kvm.keymap import combo, text_to_events
 
 
@@ -70,3 +73,45 @@ def test_scroll_directions():
     a.scroll("right", 1)
     wheel = [e for kind, e in kvm.events if kind == "wheel"]
     assert [(w.dy, w.dx) for w in wheel] == [(-1, 0), (-1, 0), (0, 1)]
+
+
+class NoSignalDevice:
+    """/frame answers 503 until a key report arrives (`wakes`), like a sleeping target."""
+
+    def __init__(self, gop: bytes, wakes: bool = True):
+        self.gop, self.wakes, self.awake, self.keys = gop, wakes, False, []
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/state"):
+            video = {"ready": True, "width": 64, "height": 48} if self.awake else {"ready": False, "error": "no_signal"}
+            return httpx.Response(200, json={"video": video})
+        if req.url.path.endswith("/keys"):
+            self.keys.append(json.loads(req.content)["events"])
+            self.awake = self.wakes
+            return httpx.Response(200, json={"ok": True})
+        if self.awake:
+            return httpx.Response(200, content=self.gop, headers={"X-Codec": "h264", "X-Frame-Seq": "7"})
+        return httpx.Response(503, json={"error": "no decodable frame yet (is an HDMI source connected?)"})
+
+
+def no_signal_kvm(fixtures_dir, wakes=True):
+    dev = NoSignalDevice((fixtures_dir / "gop.h264").read_bytes(), wakes)
+    kvm = HttpKvm("http://kvm", "tok", transport=httpx.MockTransport(dev))
+    kvm._sleep = lambda _s: None
+    return kvm, dev
+
+
+def test_no_signal_wakes_the_target_with_one_shift_tap(fixtures_dir):
+    kvm, dev = no_signal_kvm(fixtures_dir)
+    frame = kvm.screenshot()
+    assert frame.seq == 7
+    assert dev.keys == [[{"modifier": 2, "keys": [], "delayMs": 60}, {"modifier": 0, "keys": [], "delayMs": 0}]]
+
+
+def test_no_signal_raises_a_readable_error_and_does_not_keep_tapping(fixtures_dir):
+    kvm, dev = no_signal_kvm(fixtures_dir, wakes=False)
+    with pytest.raises(KvmError, match="no HDMI signal from the target computer"):
+        kvm.screenshot()
+    with pytest.raises(KvmError, match="no HDMI signal"):
+        kvm.screenshot()
+    assert len(dev.keys) == 1  # the second call is within WAKE_INTERVAL_S

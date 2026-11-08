@@ -1,5 +1,22 @@
 # Release notes
 
+## CUA 0.3.0: log in to LeanScope and pick the choreo in the dashboard (2026-11-08)
+
+**`cua/` service**
+- **LeanScope login in the dashboard:** the topmost panel logs in to LeanScope (email and
+  password) and picks the choreo repository, the choreo and where sessions are recorded.
+  - The login is kept as a refresh token in `.leanscope-session.json` (git-ignored), never the
+    password. A restart keeps the login and the choice.
+  - Replaces `LEANSCOPE_API_TOKEN`, `LEANSCOPE_REPOSITORY_ID`, `LEANSCOPE_CHOREO_SCENARIO_GUID` and
+    `LEANSCOPE_SESSION_REPOSITORY_ID`. Only `LEANSCOPE_AGENT_SERVER_URL` is left to set.
+  - Without a login or a picked choreo, runs go ahead without a session (`not_configured`).
+- **The choreo fills in the goal:** picking a choreo puts its persona goal into Goal and its
+  preconditions into Hints (one per line). Both stay editable.
+- **No HDMI signal:** when the target computer sends no picture (asleep, display off), the CUA
+  taps Shift to wake it, at most every 30 s, and retries. If that fails, the error says
+  "no HDMI signal from the target computer" instead of a bare 503. The live view shows that
+  message and retries every 10 s instead of every 2 s.
+
 ## CUA 0.2.0: follow and steer a run live (2026-11-08)
 
 **`cua/` service**

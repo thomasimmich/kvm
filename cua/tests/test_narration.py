@@ -13,6 +13,7 @@ from kvm_cua.decision.decider import StubDecider
 from kvm_cua.kvm.device import FakeKvm
 from kvm_cua.mcp_server import BearerAuth, build_server
 from kvm_cua.narration.agent_server import SessionHandle
+from kvm_cua.narration.leanscope_auth import ChoreoSelection, LeanScopeAuth
 from kvm_cua.narration.publisher import NarrationPublisher
 from kvm_cua.narration.session import NarrationSessions
 from kvm_cua.perception.parser import FixtureParser
@@ -111,8 +112,15 @@ def test_slow_agent_server_does_not_slow_the_run(tmp_path):
     pub._closed = True  # don't wait for the backlog in the test
 
 
-def sessions(client):
-    return NarrationSessions(client, 145, "choreo-guid", remote_control_url="https://rc.example/app",
+def logged_in(selection: ChoreoSelection | None = None) -> LeanScopeAuth:
+    auth = LeanScopeAuth("https://supabase.example", "anon")
+    auth._refresh_token, auth.email = "refresh", "me@example.com"
+    auth.selection = selection or ChoreoSelection("145", "choreo-guid")
+    return auth
+
+
+def sessions(client, auth=None):
+    return NarrationSessions(client, auth or logged_in(), remote_control_url="https://rc.example/app",
                              dispatch_timeout_s=2.0)  # fmt: skip
 
 
@@ -130,7 +138,7 @@ def test_session_begin_waits_for_the_dispatch_and_routes_commands():
     client.on_start = lambda: ns.on_dispatch(dispatch_body())
     run = ns.begin("open settings", ["hint"], ["password"], 15)
     assert run.status == "running" and run.activity_url == ACTIVITY
-    assert client.calls[0] == ("run_choreo", 145, "choreo-guid",
+    assert client.calls[0] == ("run_choreo", "145", "choreo-guid",
                                {"goal": "open settings", "hints": ["hint"], "inputNames": ["password"]})  # fmt: skip
     assert ns.remote_control_link(run) == (
         "https://rc.example/app?agentServer=https%3A%2F%2Fagent.example&sessionToken=tok-1"
@@ -154,6 +162,15 @@ def test_session_without_dispatch_runs_unnarrated():
     assert run.status == "no_dispatch" and run.publisher is None and "CUA_PUBLIC_URL" in run.error
 
 
+def test_session_without_login_or_choreo_runs_unnarrated():
+    client = FakeAgentServer()
+    auth = LeanScopeAuth("https://supabase.example", "anon")
+    run = sessions(client, auth).begin("open settings", [], [], 15)
+    assert run.status == "not_configured" and "not logged in" in run.error and not client.calls
+    run = sessions(client, logged_in(ChoreoSelection())).begin("open settings", [], [], 15)
+    assert run.status == "not_configured" and "no choreo picked" in run.error and not client.calls
+
+
 def test_private_callback_origin_falls_back_to_our_agent_server_url():
     ns = sessions(FakeAgentServer())
     body = dispatch_body()
@@ -167,12 +184,12 @@ def narrated_service(tmp_path, key=""):
     imgs = [make_screen(HOME), make_screen(SETTINGS)]
     parser = FixtureParser([elements(HOME), elements(SETTINGS)]).bind(imgs)
     s = Settings(cua_runs_dir=tmp_path, cua_worker_key=key, leanscope_agent_server_url="http://agent",
-                 leanscope_repository_id="145", leanscope_choreo_scenario_guid="choreo-guid",
-                 cua_vision_provider="none", _env_file=None)  # fmt: skip
+                 cua_state_file=tmp_path / "state.json", cua_vision_provider="none", _env_file=None)  # fmt: skip
     svc = CuaService(s, device=FakeKvm(imgs), parser=parser, decider=StubDecider(done_when="general"))
     svc.agent.settle_interval_s = svc.agent.settle_timeout_s = 0.0
     fake = FakeAgentServer()
     svc.narration.client = fake
+    svc.narration.auth = logged_in()
     fake.on_start = lambda: svc.narration.on_dispatch(dispatch_body())
     return svc, fake
 

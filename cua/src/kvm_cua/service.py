@@ -22,6 +22,7 @@ from .decision.jev import JevClient
 from .kvm.actuation import Actuator
 from .kvm.device import HttpKvm, KvmDevice
 from .narration.agent_server import AgentServerClient
+from .narration.leanscope_auth import LeanScopeAuth, LeanScopeCatalog
 from .narration.publisher import NarrationPublisher
 from .narration.session import NarrationSessions
 from .narration.vision import make_describer
@@ -60,12 +61,16 @@ class CuaService:
         self.live = LiveState()
         self._publisher: NarrationPublisher | None = None
         self.narration: NarrationSessions | None = None
+        self.leanscope: LeanScopeAuth | None = None
+        self.catalog: LeanScopeCatalog | None = None
         if settings.narration_enabled:
+            self.leanscope = LeanScopeAuth(
+                settings.leanscope_supabase_url, settings.leanscope_supabase_anon_key, settings.cua_state_file
+            )
+            self.catalog = LeanScopeCatalog(settings.leanscope_api_url, self.leanscope)
             self.narration = NarrationSessions(
-                AgentServerClient(settings.leanscope_agent_server_url, settings.leanscope_api_token),
-                settings.leanscope_repository_id,
-                settings.leanscope_choreo_scenario_guid,
-                settings.leanscope_session_repository_id or None,
+                AgentServerClient(settings.leanscope_agent_server_url, self.leanscope.access_token),
+                self.leanscope,
                 settings.leanscope_remote_control_url,
                 settings.cua_dispatch_timeout_s,
             )

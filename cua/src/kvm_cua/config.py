@@ -53,12 +53,16 @@ class Settings(BaseSettings):
     cua_vision_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = Field("", validation_alias=AliasChoices("OPENAI_API_KEY", "LEANSCOPE_OPENAI_API_KEY"))
 
-    # Live narration into a LeanScope agent-server session (off while these are empty)
+    # Live narration into a LeanScope agent-server session (off while the URL is empty).
+    # Login and the choice of choreo happen in the dashboard and are kept in cua_state_file.
     leanscope_agent_server_url: str = ""
-    leanscope_api_token: str = ""
-    leanscope_repository_id: str = ""
-    leanscope_choreo_scenario_guid: str = ""
-    leanscope_session_repository_id: str = ""
+    leanscope_api_url: str = "https://api.leanscope.io"
+    # LeanScope's login service (Supabase); the anon key is public by design
+    leanscope_supabase_url: str = "https://ezmofhpfycarkvhcfvje.supabase.co"
+    leanscope_supabase_anon_key: str = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV6bW9maHBmeWNhcmt2aGNmdmplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA5OTM3MDYsImV4cCI6MjA4NjU2OTcwNn0.8tWAQD8c3c8pvb6-wDoJ5kFeKl-DLxevYkE6s6rhy8M"
+    )
+    cua_state_file: Path = Path(".leanscope-session.json")  # refresh token + choreo choice; git-ignored
     leanscope_remote_control_url: str = ""  # the remote control app; the QR code links here
     cua_public_url: str = ""  # how the agent server reaches this service (the choreo's Worker dispatcher)
     cua_worker_key: str = ""  # ?key=… the dispatcher URL must carry
@@ -66,8 +70,7 @@ class Settings(BaseSettings):
 
     @property
     def narration_enabled(self) -> bool:
-        return bool(self.leanscope_agent_server_url and self.leanscope_repository_id
-                    and self.leanscope_choreo_scenario_guid)  # fmt: skip
+        return bool(self.leanscope_agent_server_url)
 
     @property
     def worker_dispatch_url(self) -> str:

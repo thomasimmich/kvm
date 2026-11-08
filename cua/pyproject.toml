@@ -1,6 +1,6 @@
 [project]
 name = "kvm-cua"
-version = "0.2.1"
+version = "0.3.0"
 description = "Computer-using agent that drives a remote machine through a JetKVM (screen parsing + TypeSafe Jev decisions + human-like HID input)"
 requires-python = ">=3.12,<3.13"
 dependencies = [

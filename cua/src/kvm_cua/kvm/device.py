@@ -75,17 +75,28 @@ class KvmError(RuntimeError):
 # Requests carry at most this many events; the firmware limit is 1000.
 _CHUNK = 500
 
+NO_SIGNAL = "no HDMI signal from the target computer (asleep or display off?)"
+# Without an HDMI signal /frame answers 503. A Shift tap wakes a sleeping target; it is sent at most
+# this often, so the dashboard's live view does not keep pressing keys on a computer that is off.
+WAKE_INTERVAL_S = 30.0
+WAKE_TRIES = 3  # /frame attempts after a wake; each waits up to 3 s on the device
+SHIFT = 0x02
+
 
 class HttpKvm:
-    def __init__(self, base_url: str, token: str, timeout_s: float = 10.0):
+    def __init__(self, base_url: str, token: str, timeout_s: float = 10.0,
+                 transport: httpx.BaseTransport | None = None):  # fmt: skip
         if not token:
             raise KvmError("KVM_TOKEN is empty — enable the CUA API on the device first (see cua/README.md)")
         self._client = httpx.Client(
             base_url=base_url.rstrip("/") + "/api/cua",
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout_s,
+            transport=transport,
         )
         self._size: tuple[int, int] | None = None
+        self._last_wake = float("-inf")
+        self._sleep = time.sleep
 
     def close(self) -> None:
         self._client.close()
@@ -97,13 +108,15 @@ class HttpKvm:
         if self._size is None:
             v = self.state()["video"]
             if not v.get("width") or not v.get("height"):
-                raise KvmError(f"no video signal: {v}")
+                raise KvmError(f"{NO_SIGNAL} ({v.get('error') or 'no picture'})")
             self._size = (int(v["width"]), int(v["height"]))
         return self._size
 
     def screenshot(self, after_seq: int = 0) -> Frame:
         params = {"after": str(after_seq)} if after_seq else None
         r = self._client.get("/frame", params=params)
+        if r.status_code == 503:
+            r = self._wake_target(params, r)
         if r.status_code != 200:
             raise KvmError(f"/frame failed: HTTP {r.status_code} {r.text[:200]}")
         _check_not_web_ui(r)
@@ -115,6 +128,27 @@ class HttpKvm:
         else:
             self._size = image.size
         return Frame(image=image, seq=int(r.headers.get("X-Frame-Seq", "0")), captured_at=time.time())
+
+    def _wake_target(self, params: dict | None, r: httpx.Response) -> httpx.Response:
+        """/frame said 503. Without an HDMI signal: tap Shift (at most every WAKE_INTERVAL_S) and retry,
+        else raise NO_SIGNAL. Other 503s (e.g. video paused by a browser session) are returned as they are."""
+        try:
+            v = self.state().get("video") or {}
+        except (KvmError, httpx.HTTPError):
+            return r
+        if v.get("ready") and not v.get("error"):
+            return r
+        now = time.monotonic()
+        if now - self._last_wake >= WAKE_INTERVAL_S:
+            self._last_wake = now
+            self.keys([KeyEvent(modifier=SHIFT, delay_ms=60), KeyEvent()])
+            for _ in range(WAKE_TRIES):
+                self._sleep(0.5)
+                r = self._client.get("/frame", params=params)
+                if r.status_code == 200:
+                    self._size = None  # the target may come back with another resolution
+                    return r
+        raise KvmError(f"{NO_SIGNAL} ({v.get('error') or 'no picture'})")
 
     def mouse(self, events: Sequence[MouseEvent]) -> None:
         self._post_chunks("/mouse", [e.to_json() for e in events])

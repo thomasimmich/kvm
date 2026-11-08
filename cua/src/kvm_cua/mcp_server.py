@@ -27,6 +27,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent.inbox import Command, parse_command
+from .narration.leanscope_auth import ChoreoSelection, LeanScopeError
 from .service import CuaService, screen_text
 
 log = logging.getLogger(__name__)
@@ -242,13 +243,68 @@ def build_server(service: CuaService) -> MCPServer:
         elif not _is_loopback(request.client.host if request.client else ""):
             return JSONResponse({"error": "set CUA_WORKER_KEY to accept remote dispatches"}, status_code=401)
         if service.narration is None:
-            return JSONResponse({"error": "narration is off: set the LEANSCOPE_* variables"}, status_code=503)
+            return JSONResponse({"error": "narration is off: set LEANSCOPE_AGENT_SERVER_URL"}, status_code=503)
         try:
             body = await request.json()
         except ValueError:
             return JSONResponse({"error": "expected a JSON worker body"}, status_code=400)
         status, payload = await blocking(service.narration.on_dispatch, body)
         return JSONResponse(payload, status_code=status)
+
+    # --- LeanScope login and the choice of choreo ---------------------------------
+
+    def leanscope_off() -> Response | None:
+        if service.leanscope is None or service.catalog is None:
+            return JSONResponse(
+                {"ok": False, "error": "narration is off: set LEANSCOPE_AGENT_SERVER_URL"}, status_code=503
+            )
+        return None
+
+    async def leanscope_call(fn, *args) -> Response:
+        try:
+            return JSONResponse({"ok": True, "result": await blocking(fn, *args)})
+        except LeanScopeError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    @mcp.custom_route("/dashboard/api/leanscope/login", methods=["POST"])
+    async def leanscope_login(request: Request) -> Response:
+        if (off := leanscope_off()) is not None:
+            return off
+        body = await request.json()
+        return await leanscope_call(service.leanscope.login, body.get("email") or "", body.get("password") or "")  # type: ignore[union-attr]
+
+    @mcp.custom_route("/dashboard/api/leanscope/logout", methods=["POST"])
+    async def leanscope_logout(_: Request) -> Response:
+        if (off := leanscope_off()) is not None:
+            return off
+        return await leanscope_call(service.leanscope.logout)  # type: ignore[union-attr]
+
+    @mcp.custom_route("/dashboard/api/leanscope/repositories", methods=["GET"])
+    async def leanscope_repositories(_: Request) -> Response:
+        if (off := leanscope_off()) is not None:
+            return off
+        return await leanscope_call(service.catalog.repositories)  # type: ignore[union-attr]
+
+    @mcp.custom_route("/dashboard/api/leanscope/choreos", methods=["GET"])
+    async def leanscope_choreos(request: Request) -> Response:
+        """The repository's choreos with the goal and hints they prefill in the dashboard."""
+        if (off := leanscope_off()) is not None:
+            return off
+        return await leanscope_call(service.catalog.choreos, request.query_params.get("repositoryId", ""))  # type: ignore[union-attr]
+
+    @mcp.custom_route("/dashboard/api/leanscope/selection", methods=["POST"])
+    async def leanscope_selection(request: Request) -> Response:
+        """{repositoryId, scenarioGuid, scenarioTitle?, sessionRepositoryId?}: the choreo that narrates runs."""
+        if (off := leanscope_off()) is not None:
+            return off
+        b = await request.json()
+        sel = ChoreoSelection(
+            repository_id=str(b.get("repositoryId") or ""),
+            scenario_guid=str(b.get("scenarioGuid") or ""),
+            scenario_title=str(b.get("scenarioTitle") or ""),
+            session_repository_id=str(b.get("sessionRepositoryId") or ""),
+        )
+        return await leanscope_call(service.leanscope.set_selection, sel)  # type: ignore[union-attr]
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(_: Request) -> Response:
