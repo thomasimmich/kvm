@@ -144,6 +144,15 @@ See [docs/agent-server-integration.md](docs/agent-server-integration.md) for con
   The dashboard shows a QR code for the remote control app. The flow, the activity tags and
   the command format are in
   [docs/agent-server-integration.md](docs/agent-server-integration.md#5-live-narration-and-remote-control).
+- **Inner voice:** with `ELEVENLABS_API_KEY` and the OpenAI key set, the acting persona of the
+  picked choreo (its primary actor, e.g. Heinz) thinks the activity log aloud in the dashboard.
+  - An LLM (`CUA_INNER_VOICE_MODEL`) retells the newest log lines as one or two short German
+    thoughts in the persona's style (profile, motives, frustrations, quote).
+  - ElevenLabs speaks them with the voice attached to the persona: the nearest `voiceId` on the
+    persona's resource relationships, the same walk the agent server does.
+  - Lines that arrive while a thought is made or spoken are taken together, so the voice keeps up.
+  - The "🔊 Inner voice" switch in the activity log turns it on and off. A click on ▶ replays a thought.
+  - The LeanScope panel shows the persona (photo, name) and its voice, with "▶ Test voice".
 
 ## Performance (M3 Pro, 1920×1280 screen)
 
@@ -170,6 +179,7 @@ See [docs/agent-server-integration.md](docs/agent-server-integration.md) for con
 | `agent/inbox.py` | Human commands for a running loop: guidance, answer, pause, resume, cancel |
 | `narration/vision.py` | Rough screen description (OpenAI-compatible image-to-text) |
 | `narration/agent_server.py`, `narration/session.py`, `narration/publisher.py` | One LeanScope session per run: run-choreo, worker dispatch, activity narration |
+| `narration/persona_voice.py`, `narration/inner_voice.py` | The acting persona and its ElevenLabs voice; the inner voice (thoughts and speech) |
 | `mcp_server.py` | MCP tools, the prompt, the dashboard routes, `/worker/dispatch` and bearer auth |
 
 Tests: `uv run pytest`. On the firmware side: `go test ./internal/cuaapi/`, which runs on any host.

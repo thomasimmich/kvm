@@ -41,6 +41,17 @@
   .ev.muted { color: var(--muted); font-size: 12px; padding: 3px 0; }
   .ev.human { border-left: 3px solid var(--accent); padding-left: 6px; }
   .ev.desc { font-style: italic; }
+  .ev.inner { border-left: 3px solid var(--ok); padding-left: 6px; }
+  .ev.inner i { font-size: 14px; }
+  .ev.inner button { padding: 0 6px; font-size: 11px; margin-left: 4px; }
+  .persona { display: none; gap: 10px; align-items: flex-start; margin-top: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .persona.on { display: flex; }
+  .persona img { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; flex: none; background: var(--chip); }
+  .persona .who { font-weight: 600; }
+  .persona .meta { margin-top: 2px; }
+  .persona button { margin-top: 6px; padding: 3px 10px; font-size: 12px; }
+  #ivBtn { padding: 2px 8px; font-size: 12px; text-transform: none; letter-spacing: 0; float: right; }
+  #ivBtn.on { background: var(--ok); border-color: var(--ok); color: #fff; }
   .ask { display: none; margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: var(--chip); border: 1px solid var(--warn); }
   .ask.on { display: block; }
   #qr svg { width: 180px; height: 180px; display: block; margin: 4px 0 6px; }
@@ -86,6 +97,15 @@
         <label style="display:flex; gap:6px; align-items:center; margin-top:10px"><input id="lsNarrate" type="checkbox" style="width:auto"> Narrate runs into a LeanScope session</label>
         <div class="meta">Off: runs start at once. On: each run starts a session of the choreo and waits up to 20 s for its worker.</div>
         <div class="meta" id="lsHint"></div>
+        <div class="persona" id="ivCard">
+          <img id="ivImg" alt="">
+          <div style="min-width:0">
+            <div class="who" id="ivName"></div>
+            <div class="meta" id="ivVoice"></div>
+            <button type="button" id="ivTest">▶ Test voice</button>
+            <div class="meta" id="ivTestMsg"></div>
+          </div>
+        </div>
       </div>
     </section>
     <section>
@@ -118,7 +138,9 @@
       <div class="meta" id="rcMeta"></div>
     </section>
     <section>
-      <h2>Activity log <span class="t" id="logCount" style="text-transform:none;letter-spacing:0;font-weight:normal"></span></h2>
+      <h2>Activity log <span class="t" id="logCount" style="text-transform:none;letter-spacing:0;font-weight:normal"></span>
+        <button id="ivBtn" type="button" title="The acting persona thinks the log aloud">🔊 Inner voice</button></h2>
+      <div class="meta" id="ivMeta" style="margin:-4px 0 6px"></div>
       <div class="log" id="log"></div>
     </section>
     <section>
@@ -228,6 +250,7 @@ async function loadChoreos(repoId, guid) {
     choreos = await api("/dashboard/api/leanscope/choreos?repositoryId=" + encodeURIComponent(repoId));
     fillSelect(c, choreos.map(x => [x.guid, x.title]), guid, choreos.length ? "— pick a choreo —" : "— no choreos —");
     hint(choreos.length ? "" : "This repository has no scenario of type Choreo. Set the scenario's type to Choreo in LeanScope.");
+    loadPersona();
   } catch (e) { fillSelect(c, [], "", "—"); hint(e.message, true); }
   c.disabled = false;
 }
@@ -247,8 +270,8 @@ async function saveSelection() {
     });
   } catch (e) { hint(e.message, true); }
 }
-$("lsRepo").onchange = async () => { await loadChoreos($("lsRepo").value, ""); saveSelection(); };
-$("lsChoreo").onchange = () => { prefillGoal(); saveSelection(); };
+$("lsRepo").onchange = async () => { await loadChoreos($("lsRepo").value, ""); await saveSelection(); loadPersona(); };
+$("lsChoreo").onchange = async () => { prefillGoal(); await saveSelection(); loadPersona(); };
 $("lsSessionRepo").onchange = saveSelection;
 $("lsNarrate").onchange = async () => {
   try { await api("/dashboard/api/leanscope/narrate", { on: $("lsNarrate").checked }); } catch (e) { hint(e.message, true); }
@@ -290,7 +313,7 @@ let lastEventKey = "";
 function renderEvents(events) {
   const log = $("log");
   const shown = ["decision", "run_start", "run_end", "screen", "screen_description", "activity", "guidance_received",
-                 "paused", "resumed", "cancel_requested", "ask_human", "ask_human_end"];
+                 "paused", "resumed", "cancel_requested", "ask_human", "ask_human_end", "inner_voice"];
   const all = events.filter(e => shown.includes(e.type));
   const key = all.length + ":" + (all.length ? all[all.length - 1].ts : "");
   if (key === lastEventKey) return;  // unchanged: keep the scroll position
@@ -302,11 +325,13 @@ function renderEvents(events) {
   for (const e of items) {
     const d = document.createElement("div");
     d.className = "ev" + ({ activity: " muted", screen_description: " desc", guidance_received: " human", paused: " human",
-                            resumed: " human", cancel_requested: " human", ask_human: " human" }[e.type] || "");
+                            resumed: " human", cancel_requested: " human", ask_human: " human", inner_voice: " inner" }[e.type] || "");
     const t = new Date(e.ts * 1000).toLocaleTimeString();
     let html = `<span class="t">${t}</span>`;
     if (e.type === "run_start") html += `<b>start</b> ${escapeHtml(e.goal)}`;
     else if (e.type === "activity") html += escapeHtml(e.text);
+    else if (e.type === "inner_voice") html += `<b>💭 ${escapeHtml(e.persona || "inner voice")}:</b> <i>${escapeHtml(e.text)}</i>`
+      + (e.clip ? ` <button type="button" data-clip="${escapeHtml(e.clip)}" title="Play again">▶</button>` : "");
     else if (e.type === "screen_description") html += `<b>screen description</b> <span class="t">(${((e.ms || 0) / 1000).toFixed(1)} s)</span>: ${escapeHtml(e.text)}`;
     else if (e.type === "guidance_received") html += `<b>you:</b> ${escapeHtml(e.text)}`;
     else if (e.type === "paused" || e.type === "resumed") html += `<b>${e.type}</b>`;
@@ -325,6 +350,111 @@ function renderEvents(events) {
   }
   log.scrollTop = scroll;
 }
+// The acting persona of the picked choreo and the voice its inner voice speaks with.
+let personaReq = 0;
+async function loadPersona() {
+  const card = $("ivCard"), req = ++personaReq;
+  if (!$("lsChoreo").value) { card.className = "persona"; return; }
+  card.className = "persona on";
+  $("ivName").textContent = "looking up the persona …"; $("ivVoice").textContent = ""; $("ivTestMsg").textContent = "";
+  $("ivImg").removeAttribute("src");
+  let p;
+  try { p = await api("/dashboard/api/inner-voice/persona"); } catch (e) { p = { reason: e.message }; }
+  if (req !== personaReq) return;  // the choice changed meanwhile
+  $("ivName").textContent = p.persona || "No persona";
+  if (p.imageUrl) {
+    $("ivImg").onerror = () => { $("ivImg").onerror = null; $("ivImg").src = "https://app.leanscope.io/static-assets/images/persona/0000.jpg"; };
+    $("ivImg").src = p.imageUrl;
+  }
+  const v = [];
+  if (!p.available) v.push(`<span style="color:var(--bad)">Inner voice off: ${escapeHtml(p.reason)}</span>`);
+  else if (p.reason) v.push(`<span style="color:var(--bad)">${escapeHtml(p.reason)}</span>`);
+  if (p.voiceId) {
+    const name = p.voice && p.voice.name ? `“${escapeHtml(p.voice.name)}”` : "";
+    const labels = p.voice && p.voice.labels && p.voice.labels.length ? ` (${escapeHtml(p.voice.labels.join(", "))})` : "";
+    v.push(`🗣️ ElevenLabs voice ${name}${labels} <code>${escapeHtml(p.voiceId)}</code>`);
+    if (p.voiceSource) v.push(`from ${escapeHtml(p.voiceSource)}`);
+    if (p.voiceError) v.push(`<span style="color:var(--bad)">${escapeHtml(p.voiceError)}</span>`);
+  }
+  $("ivVoice").innerHTML = v.join("<br>");
+  $("ivTest").hidden = !(p.available && p.voiceId);
+}
+$("ivTest").onclick = async () => {
+  ivUnlock();  // in the click itself: that is what lets the browser play sound later
+  $("ivTest").disabled = true; $("ivTestMsg").textContent = "asking ElevenLabs …";
+  try {
+    const r = await api("/dashboard/api/inner-voice/test", {});
+    $("ivTestMsg").textContent = "„" + r.text + "“";
+    ivQueue.unshift(r.clip); ivPlaying = false; ivPlayNext();
+  } catch (e) { $("ivTestMsg").innerHTML = `<span style="color:var(--bad)">${escapeHtml(e.message)}</span>`; }
+  $("ivTest").disabled = false;
+};
+
+// Inner voice: new clips play one after the other. Clips already in the log when the page opens stay silent.
+let ivSeen = null, ivQueue = [], ivPlaying = false, ivEnabled = false;
+const ivAudio = new Audio();
+function ivPlayNext() {
+  if (ivPlaying || !ivQueue.length) return;
+  ivPlaying = true;
+  ivAudio.src = "/dashboard/api/inner-voice/" + ivQueue[0] + ".mp3";
+  ivAudio.play().then(() => { ivQueue.shift(); $("ivMeta").dataset.blocked = ""; })
+    .catch((e) => {
+      ivPlaying = false;
+      console.warn("inner voice: could not play", ivQueue[0], e);
+      if (e && e.name === "NotAllowedError") { $("ivMeta").dataset.blocked = "1"; renderInnerVoiceMeta(); }
+      else { ivQueue.shift(); ivPlayNext(); }  // the clip is gone: skip it
+    });
+}
+ivAudio.onended = () => { ivPlaying = false; ivPlayNext(); };
+function queueInnerVoice(events) {
+  const clips = events.filter(e => e.type === "inner_voice" && e.clip).map(e => e.clip);
+  if (ivSeen === null) { ivSeen = new Set(clips); return; }
+  for (const c of clips) if (!ivSeen.has(c)) { ivSeen.add(c); if (ivEnabled) ivQueue.push(c); }
+  ivPlayNext();
+}
+let ivState = {};
+function renderInnerVoiceMeta() {
+  const v = ivState, m = $("ivMeta");
+  $("ivBtn").className = v.enabled && v.available ? "on" : "";
+  $("ivBtn").disabled = !v.available;
+  let t = "";
+  if (!v.available) t = "Inner voice off: " + (v.reason || "not configured");
+  else if (!v.enabled) t = "Inner voice muted.";
+  else if (v.reason) t = "Inner voice: " + v.reason;
+  else if (v.persona) t = `Inner voice of ${v.persona}` + (m.dataset.blocked ? " · the browser blocked the sound: click anywhere to hear it" : "");
+  else t = "Inner voice on: the persona of the picked choreo speaks from the next run on.";
+  if (v.failures) t += ` · ${v.failures} failure(s)`;
+  m.textContent = t;
+}
+function renderInnerVoice(v) { ivState = v || {}; ivEnabled = !!(ivState.enabled && ivState.available); renderInnerVoiceMeta(); }
+$("ivBtn").onclick = async () => {
+  try { renderInnerVoice(await api("/dashboard/api/inner-voice", { on: !ivEnabled })); } catch (e) { alert(e.message); }
+  if (!ivEnabled) { ivQueue = []; ivAudio.pause(); ivPlaying = false; } else ivPlayNext();
+};
+// Browsers only play sound after a click on the page, and Safari only on an element that was played
+// in a click. So the first click anywhere plays a silent sound on the inner voice's audio element.
+let ivUnlocked = false;
+function silentWav() {
+  const b = new DataView(new ArrayBuffer(46)), str = (o, t) => [...t].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF"); b.setUint32(4, 38, true); str(8, "WAVEfmt "); b.setUint32(16, 16, true); b.setUint16(20, 1, true);
+  b.setUint16(22, 1, true); b.setUint32(24, 8000, true); b.setUint32(28, 16000, true); b.setUint16(32, 2, true);
+  b.setUint16(34, 16, true); str(36, "data"); b.setUint32(40, 2, true);
+  return URL.createObjectURL(new Blob([b.buffer], { type: "audio/wav" }));
+}
+function ivUnlock() {
+  if (ivUnlocked || ivPlaying) return;
+  ivUnlocked = true;
+  ivAudio.src = silentWav();
+  ivAudio.play().catch(() => { ivUnlocked = false; });
+}
+document.addEventListener("click", () => {
+  ivUnlock();
+  if ($("ivMeta").dataset.blocked) { $("ivMeta").dataset.blocked = ""; ivPlayNext(); }
+}, true);
+$("log").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-clip]");
+  if (b) { ivQueue.unshift(b.dataset.clip); if (!ivPlaying) ivPlayNext(); }
+});
 function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 async function tick() {
@@ -344,6 +474,8 @@ async function tick() {
     renderEvents(s.events || []);
     renderAsk(s.events || [], s.running);
     renderNarration(s.narration);
+    renderInnerVoice(s.innerVoice);
+    queueInnerVoice(s.events || []);
     if (res) $("result").textContent = `${res.status}: ${res.message}\n` + (res.steps || []).map(x => `${x.step}. ${x.action} → ${x.outcome}`).join("\n");
     $("run").disabled = s.running;
     for (const id of ["tell", "pause", "resume"]) $(id).disabled = !s.running;

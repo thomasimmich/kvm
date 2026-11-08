@@ -1,5 +1,26 @@
 # Release notes
 
+## CUA 0.4.0: the acting persona's inner voice (2026-11-08)
+
+**`cua/` service**
+- **Inner voice in the dashboard:** the persona acting in the picked choreo (its primary actor)
+  thinks the activity log aloud.
+  - An LLM retells the log lines as one or two short German thoughts in the persona's style:
+    profile, motives, frustrations and quote come from LeanScope. Element numbers,
+    percentages and the agent itself are left out.
+  - ElevenLabs speaks the thoughts with the persona's voice. The CUA finds it like the agent
+    server does: the nearest `voiceId` on the persona's resource relationships (for example
+    persona → voice resource, with `voiceId` set on that relationship).
+  - Lines that arrive while a thought is made or spoken are taken together, so the voice
+    keeps up with the run instead of falling behind.
+  - The log shows the thoughts (💭) with a replay button. The "🔊 Inner voice" switch turns it on and off.
+  - The LeanScope panel shows the picked choreo's persona: photo, name, and the ElevenLabs voice
+    (name, labels, id, and where it was found). "▶ Test voice" speaks a short greeting with it.
+  - The first click anywhere on the dashboard unlocks sound, so later thoughts play on their own.
+  - New settings: `ELEVENLABS_API_KEY`, `ELEVENLABS_TTS_MODEL`, `CUA_INNER_VOICE`,
+    `CUA_INNER_VOICE_MODEL`, `CUA_INNER_VOICE_PERSONA_GUID`, `CUA_INNER_VOICE_ID`.
+  - A missing key, login or voice shows up as one activity line at the start of a run.
+
 ## CUA 0.3.0: log in to LeanScope and pick the choreo in the dashboard (2026-11-08)
 
 **`cua/` service**

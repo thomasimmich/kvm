@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     cua_vision_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = Field("", validation_alias=AliasChoices("OPENAI_API_KEY", "LEANSCOPE_OPENAI_API_KEY"))
 
+    # Inner voice: the acting persona of the picked choreo thinks the activity log aloud (dashboard).
+    # Its thoughts come from the OpenAI-compatible API above, its voice from ElevenLabs.
+    cua_inner_voice: bool = True  # on at start; the dashboard switch turns it on and off
+    cua_inner_voice_model: str = "gpt-4.1-mini"
+    cua_inner_voice_persona_guid: str = ""  # empty: the picked choreo's primary actor
+    cua_inner_voice_id: str = ""  # ElevenLabs voice id when the persona has none attached
+    elevenlabs_api_key: str = ""
+    elevenlabs_tts_model: str = "eleven_multilingual_v2"
+
     # Live narration into a LeanScope agent-server session (off while the URL is empty).
     # Login and the choice of choreo happen in the dashboard and are kept in cua_state_file.
     leanscope_agent_server_url: str = ""

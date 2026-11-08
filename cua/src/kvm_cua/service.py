@@ -22,7 +22,9 @@ from .decision.jev import JevClient
 from .kvm.actuation import Actuator
 from .kvm.device import HttpKvm, KvmDevice
 from .narration.agent_server import AgentServerClient
-from .narration.leanscope_auth import LeanScopeAuth, LeanScopeCatalog
+from .narration.inner_voice import InnerVoice, Speaker, Thinker
+from .narration.leanscope_auth import ChoreoSelection, LeanScopeAuth, LeanScopeCatalog
+from .narration.persona_voice import PersonaVoiceCache
 from .narration.publisher import NarrationPublisher
 from .narration.session import NarrationSessions
 from .narration.vision import make_describer
@@ -75,6 +77,32 @@ class CuaService:
                 settings.cua_dispatch_timeout_s,
             )
             self.narration.on_command = self.command
+        self.inner_voice = self._make_inner_voice()
+
+    def _make_inner_voice(self) -> InnerVoice:
+        s = self.settings
+        off = ""
+        if not s.elevenlabs_api_key:
+            off = "ELEVENLABS_API_KEY is not set in .env"
+        elif not s.openai_api_key:
+            off = "LEANSCOPE_OPENAI_API_KEY is not set in .env (OPENAI_API_KEY works too)"
+        elif self.catalog is None:
+            off = "LeanScope is not configured (LEANSCOPE_AGENT_SERVER_URL), so there is no persona"
+        auth = self.leanscope
+        voices = PersonaVoiceCache(
+            self.catalog,
+            lambda: auth.selection if auth else ChoreoSelection(),
+            s.cua_inner_voice_persona_guid,
+            s.cua_inner_voice_id,
+        )
+        return InnerVoice(
+            self._on_event,
+            voices.get,
+            Thinker(s.openai_api_key, s.cua_inner_voice_model, s.cua_vision_base_url) if not off else None,
+            Speaker(s.elevenlabs_api_key, s.elevenlabs_tts_model) if not off else None,
+            enabled=s.cua_inner_voice,
+            off_reason=off,
+        )
 
     # --- lazy wiring -----------------------------------------------------------
 
@@ -129,6 +157,7 @@ class CuaService:
         pub = self._publisher
         if pub is not None:
             pub(ev)
+        self.inner_voice(ev)
         # keys starting with "_" hold images and objects for the publisher, not JSON for the dashboard
         self.live.events.append({k: v for k, v in ev.items() if not k.startswith("_")})
         if ev.get("type") == "decision":

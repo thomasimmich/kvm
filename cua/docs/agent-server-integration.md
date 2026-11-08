@@ -186,3 +186,13 @@ With 1–3 in place, the CUA side would be small:
 - `NarrationPublisher` would write `[desc]`, `[elements]` and `[decision]` as choreo steps,
   using `config.context.choreoStepsUrl` and `insertAfterStepGuid` from the worker body.
 - The micro `[activity]` lines would stay in the activity.
+
+## 6. Inner voice of the acting persona
+
+The inner voice (see the README) plays in the CUA dashboard only; its thoughts and clips do not go
+into the session. It reads from LeanScope with the dashboard login, in the picked choreo's
+repository: the choreo's `primaryActorRef`, the persona's profile, and the persona's resource
+relationships (breadth-first, up to 3 edges). The nearest `voiceId` (parameter
+`94896ee6-bf6c-46a1-b404-e872365ef034`, or the legacy `voice` parameter) is the ElevenLabs voice.
+The persona's own `voiceId` field only counts when it looks like an ElevenLabs id, since it
+usually names an OpenAI voice.

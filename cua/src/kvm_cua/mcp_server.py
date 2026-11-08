@@ -148,7 +148,35 @@ def build_server(service: CuaService) -> MCPServer:
             "decider": service.settings.typesafe_api_key and "jev" or "stub",
             "describer": "vision" if service._agent and service._agent.describer else "off",
             "narration": narration_state(),
+            "innerVoice": service.inner_voice.state(),
         })  # fmt: skip
+
+    @mcp.custom_route("/dashboard/api/inner-voice/{clip}.mp3", methods=["GET"])
+    async def inner_voice_clip(request: Request) -> Response:
+        audio = service.inner_voice.clip(request.path_params["clip"])
+        if audio is None:
+            return PlainTextResponse("no such clip", status_code=404)
+        return Response(audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+    @mcp.custom_route("/dashboard/api/inner-voice/persona", methods=["GET"])
+    async def inner_voice_persona(_: Request) -> Response:
+        """The picked choreo's acting persona: name, image, and the voice the inner voice speaks with."""
+        return JSONResponse({"ok": True, "result": await blocking(service.inner_voice.lookup)})
+
+    @mcp.custom_route("/dashboard/api/inner-voice/test", methods=["POST"])
+    async def inner_voice_test(_: Request) -> Response:
+        """Speaks a short greeting with the persona's voice; the dashboard plays the clip."""
+        try:
+            return JSONResponse({"ok": True, "result": await blocking(service.inner_voice.test)})
+        except Exception as e:  # noqa: BLE001 — shown on the dashboard
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+
+    @mcp.custom_route("/dashboard/api/inner-voice", methods=["POST"])
+    async def inner_voice_switch(request: Request) -> Response:
+        """{on}: whether the acting persona thinks the activity log aloud."""
+        b = await request.json()
+        service.inner_voice.enabled = b.get("on") is True
+        return JSONResponse({"ok": True, "result": service.inner_voice.state()})
 
     def narration_state() -> dict:
         if service.narration is None:
