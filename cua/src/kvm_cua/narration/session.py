@@ -207,7 +207,8 @@ def qr_svg(text: str) -> str:
         try:
             import segno
 
-            _qr_cache.clear()
+            if len(_qr_cache) >= 4:  # the remote control link and the dashboard's own LAN link
+                _qr_cache.clear()
             _qr_cache[text] = segno.make(text, error="m").svg_inline(
                 scale=4, border=2, dark="black", light="white"
             )

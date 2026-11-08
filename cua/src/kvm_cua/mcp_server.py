@@ -29,6 +29,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .agent.inbox import Command, parse_command
 from .kvm.sphero import SpheroError
 from .narration.leanscope_auth import ChoreoSelection, LeanScopeError
+from .narration.session import qr_svg
 from .service import Busy, CuaService, screen_text
 
 log = logging.getLogger(__name__)
@@ -153,6 +154,20 @@ def build_server(service: CuaService) -> MCPServer:
             "pointer": service.pointer_state(),
             "sphero": service.sphero.snapshot(),
         })  # fmt: skip
+
+    @mcp.custom_route("/dashboard/api/network", methods=["GET"])
+    async def dashboard_network(_: Request) -> Response:
+        """The dashboard's address on the local network (with the token) and its QR code, for the
+        header LED. Only reached by the local browser or a client that already has the token."""
+        s = service.settings
+        if _is_loopback(s.cua_mcp_host):
+            return JSONResponse({"lan": False, "port": s.cua_mcp_port})
+        ip = s.cua_mcp_host if s.cua_mcp_host not in ("0.0.0.0", "::") else _lan_ip()
+        if not ip:
+            return JSONResponse({"lan": False, "port": s.cua_mcp_port, "error": "no network address found"})
+        token = f"?token={s.cua_mcp_token}" if s.cua_mcp_token else ""
+        url = f"http://{ip}:{s.cua_mcp_port}/dashboard{token}"
+        return JSONResponse({"lan": True, "url": url, "qrSvg": qr_svg(url)})
 
     @mcp.custom_route("/dashboard/api/inner-voice/{clip}.mp3", methods=["GET"])
     async def inner_voice_clip(request: Request) -> Response:
@@ -473,6 +488,19 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return host in ("localhost", "testclient")
+
+
+def _lan_ip() -> str:
+    """This machine's address on the local network: the source address of a route to the
+    internet (connecting a UDP socket sends nothing)."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("10.255.255.255", 1))
+            return sock.getsockname()[0]
+    except OSError:
+        return ""
 
 
 def build_app(service: CuaService):
