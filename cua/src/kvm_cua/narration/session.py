@@ -178,6 +178,7 @@ class NarrationSessions:
         login = {
             "enabled": True,
             "loggedIn": self.auth.logged_in,
+            "narrate": self.auth.narrate,
             "email": self.auth.email,
             "selection": self.auth.selection.to_json(),
         }

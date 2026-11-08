@@ -83,6 +83,8 @@
         <select id="lsChoreo"></select>
         <label for="lsSessionRepo">Record sessions in</label>
         <select id="lsSessionRepo"></select>
+        <label style="display:flex; gap:6px; align-items:center; margin-top:10px"><input id="lsNarrate" type="checkbox" style="width:auto"> Narrate runs into a LeanScope session</label>
+        <div class="meta">Off: runs start at once. On: each run starts a session of the choreo and waits up to 20 s for its worker.</div>
         <div class="meta" id="lsHint"></div>
       </div>
     </section>
@@ -248,6 +250,9 @@ async function saveSelection() {
 $("lsRepo").onchange = async () => { await loadChoreos($("lsRepo").value, ""); saveSelection(); };
 $("lsChoreo").onchange = () => { prefillGoal(); saveSelection(); };
 $("lsSessionRepo").onchange = saveSelection;
+$("lsNarrate").onchange = async () => {
+  try { await api("/dashboard/api/leanscope/narrate", { on: $("lsNarrate").checked }); } catch (e) { hint(e.message, true); }
+};
 $("lsLogin").onsubmit = async (ev) => {
   ev.preventDefault();
   $("lsLoginBtn").disabled = true;
@@ -259,8 +264,10 @@ $("lsLogout").onclick = async (ev) => { ev.preventDefault(); try { await api("/d
 
 let lastQr = "", lsLoggedIn = null;
 function renderNarration(n) {
-  $("rc").hidden = $("ls").hidden = !n || !n.enabled;
+  $("ls").hidden = !n || !n.enabled;
+  $("rc").hidden = !n || !n.enabled || !n.narrate;
   if (!n || !n.enabled) return;
+  if (document.activeElement !== $("lsNarrate")) $("lsNarrate").checked = !!n.narrate;
   if (n.loggedIn !== lsLoggedIn) {
     lsLoggedIn = n.loggedIn;
     $("lsLogin").hidden = !!n.loggedIn;

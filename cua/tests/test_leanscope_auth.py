@@ -174,5 +174,9 @@ def test_dashboard_login_routes(tmp_path):
         c.post("/dashboard/api/leanscope/selection", json={"repositoryId": "145", "scenarioGuid": "g2"})
         n = c.get("/dashboard/api/state").json()["narration"]
         assert n["loggedIn"] and n["selection"]["scenarioGuid"] == "g2"
+        assert not n["narrate"]  # off by default
+        c.post("/dashboard/api/leanscope/narrate", json={"on": True})
+        assert c.get("/dashboard/api/state").json()["narration"]["narrate"]
+        assert json.loads((tmp_path / "state.json").read_text())["narrate"] is True
         c.post("/dashboard/api/leanscope/logout")
         assert not c.get("/dashboard/api/state").json()["narration"]["loggedIn"]

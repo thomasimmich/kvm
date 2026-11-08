@@ -180,7 +180,7 @@ def test_private_callback_origin_falls_back_to_our_agent_server_url():
     )
 
 
-def narrated_service(tmp_path, key=""):
+def narrated_service(tmp_path, key="", narrate=True):
     imgs = [make_screen(HOME), make_screen(SETTINGS)]
     parser = FixtureParser([elements(HOME), elements(SETTINGS)]).bind(imgs)
     s = Settings(cua_runs_dir=tmp_path, cua_worker_key=key, leanscope_agent_server_url="http://agent",
@@ -190,6 +190,7 @@ def narrated_service(tmp_path, key=""):
     fake = FakeAgentServer()
     svc.narration.client = fake
     svc.narration.auth = logged_in()
+    svc.narration.auth.narrate = narrate
     fake.on_start = lambda: svc.narration.on_dispatch(dispatch_body())
     return svc, fake
 
@@ -215,3 +216,10 @@ def test_service_run_is_narrated_and_links_the_session(tmp_path):
     assert svc.narration.current.status == "settled"
     # images stay out of the dashboard's JSON events
     assert all(not k.startswith("_") for e in svc.live.events for k in e)
+
+
+def test_runs_start_no_session_while_narration_is_off(tmp_path):
+    svc, fake = narrated_service(tmp_path, narrate=False)
+    res = svc.run_goal("open settings")
+    assert res.status == "done" and not res.session_url
+    assert fake.calls == [] and svc.narration.current is None

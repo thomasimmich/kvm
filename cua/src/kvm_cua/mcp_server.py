@@ -292,6 +292,14 @@ def build_server(service: CuaService) -> MCPServer:
             return off
         return await leanscope_call(service.catalog.choreos, request.query_params.get("repositoryId", ""))  # type: ignore[union-attr]
 
+    @mcp.custom_route("/dashboard/api/leanscope/narrate", methods=["POST"])
+    async def leanscope_narrate(request: Request) -> Response:
+        """{on}: whether runs start a LeanScope session of the picked choreo (off by default)."""
+        if (off := leanscope_off()) is not None:
+            return off
+        b = await request.json()
+        return await leanscope_call(service.leanscope.set_narrate, b.get("on") is True)  # type: ignore[union-attr]
+
     @mcp.custom_route("/dashboard/api/leanscope/selection", methods=["POST"])
     async def leanscope_selection(request: Request) -> Response:
         """{repositoryId, scenarioGuid, scenarioTitle?, sessionRepositoryId?}: the choreo that narrates runs."""

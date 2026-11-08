@@ -65,6 +65,8 @@ class LeanScopeAuth:
         self._access_token = ""
         self._expires_at = 0.0
         self.selection = ChoreoSelection()
+        # narrate runs into a session of the choreo; off by default, since a run then waits for its worker
+        self.narrate = False
         self._load()
 
     @property
@@ -111,6 +113,11 @@ class LeanScopeAuth:
             self._take(data)  # the refresh token rotates: keep the new one
             self._save()
             return self._access_token
+
+    def set_narrate(self, on: bool) -> None:
+        with self._lock:
+            self.narrate = bool(on)
+            self._save()
 
     def set_selection(self, selection: ChoreoSelection) -> None:
         with self._lock:
@@ -160,6 +167,7 @@ class LeanScopeAuth:
             return
         self.email = j.get("email") or ""
         self._refresh_token = j.get("refreshToken") or ""
+        self.narrate = j.get("narrate") is True
         sel = j.get("selection") or {}
         self.selection = ChoreoSelection(
             **{f.name: str(sel.get(f.name) or "") for f in fields(ChoreoSelection)}
@@ -168,7 +176,8 @@ class LeanScopeAuth:
     def _save(self) -> None:
         if self.state_file is None:
             return
-        data = {"email": self.email, "refreshToken": self._refresh_token, "selection": asdict(self.selection)}
+        data = {"email": self.email, "refreshToken": self._refresh_token, "selection": asdict(self.selection),
+                "narrate": self.narrate}
         tmp = self.state_file.with_name(self.state_file.name + ".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:

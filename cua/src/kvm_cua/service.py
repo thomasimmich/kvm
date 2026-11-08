@@ -156,7 +156,7 @@ class CuaService:
         run = None
         t0 = time.time()
         try:
-            if self.narration is not None:
+            if self.narration is not None and self.narration.auth.narrate:  # off by default (dashboard switch)
                 run = self.narration.begin(goal, list(hints or []), list((inputs or {}).keys()), steps)
                 self._publisher = run.publisher
                 if time_budget_s is not None:  # starting the session took part of the caller's time
