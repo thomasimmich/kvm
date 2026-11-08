@@ -270,6 +270,14 @@ class CuaService:
     def press(self, combo: str) -> Screen:
         return self._act_then_observe(lambda prev: self.agent.actuator.press(combo))
 
+    def reset_live(self) -> None:
+        """Empties what the dashboard shows of past runs (the activity log and the last result)."""
+        live = self.live
+        live.events.clear()
+        live.last_result = None
+        live.goal = None
+        live.highlight = None
+
     # --- manual pointer from the dashboard's live view -------------------------------
 
     def _manual(self, fn) -> None:

@@ -109,3 +109,16 @@ def wait(cond, timeout=2.0):
             return True
         time.sleep(0.01)
     return False
+
+
+def test_dashboard_reset(tmp_path):
+    svc = service(tmp_path)
+    svc.live.events.append({"type": "activity", "text": "old", "ts": 0})
+    svc.live.last_result = {"status": "done", "message": "old"}
+    with TestClient(build_server(svc).streamable_http_app(host="127.0.0.1")) as c:
+        svc.live.running = True
+        assert c.post("/dashboard/api/reset").status_code == 409
+        svc.live.running = False
+        assert c.post("/dashboard/api/reset").json() == {"ok": True}
+        st = c.get("/dashboard/api/state").json()
+        assert st["events"] == [] and st["lastResult"] is None

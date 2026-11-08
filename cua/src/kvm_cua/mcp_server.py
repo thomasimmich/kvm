@@ -304,6 +304,14 @@ def build_server(service: CuaService) -> MCPServer:
             service._agent.cancel()
         return JSONResponse({"ok": True})
 
+    @mcp.custom_route("/dashboard/api/reset", methods=["POST"])
+    async def dashboard_reset(_: Request) -> Response:
+        """Starts the dashboard from scratch: empties the activity log and the last result."""
+        if service.live.running:
+            return JSONResponse({"ok": False, "error": "a run is in progress"}, status_code=409)
+        service.reset_live()
+        return JSONResponse({"ok": True})
+
     async def steer(cmd: Command | None) -> Response:
         if cmd is None:
             return JSONResponse({"ok": False, "error": "say what the agent should do"}, status_code=400)
