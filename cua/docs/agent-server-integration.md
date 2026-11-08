@@ -144,5 +144,45 @@ How the loop handles them:
 - Pass multimodal tool results through, so a vision LLM in the choreo could also look at the screenshot.
 - Raise the call timeout for this server, so long runs need fewer continuation calls.
 - A worker-scoped route to append real session steps with file attachments, so screens could be
-  steps with resources instead of activity entries.
+  steps with resources instead of activity entries. See the follow-up below.
 - A read-only viewer token, so a QR code does not hand out a session token that can also submit.
+
+## Follow-up: narrate as choreo steps instead of activity entries
+
+Idea: write the narration as choreo steps into the run's disposable choreo copy, the way the
+group-discussion example grows its choreo (`examples/group-discussion` in the agent server,
+`docs/emergent-choreo.md`). The steps would then be real conversation turns, spoken by TTS.
+We checked this on 2026-11-08 against the agent server and stayed with activity entries,
+because today a Worker can't get the same effect:
+
+| | Group discussion (director) | CUA (🦾 Worker) |
+|---|---|---|
+| Who writes | the director persona, with the in-engine `write_choreo_step` Function, inside its own LLM turn | an outside process, with `POST {choreoStepsUrl}` `{after, line, actorRef?}` |
+| When the step plays | right after the director's turn: the engine re-reads the copy and plays the new step next | only after the Worker has finished: while it runs, the engine holds the Worker step (`holdWhileWorkerPending` in `src/engine/agent-engine.ts`) and walks into inserted steps afterwards |
+| How it plays | one LLM turn of the speaking persona | the same: the line becomes a task for the persona ("Your current task now is: …"), so it is rewritten, not shown word for word |
+
+Further limits of the insert route:
+- **Text only.** The body is strictly `{after, line, actorRef?}`, so a file can't be attached to
+  a step. An image link in the line only shows up if the persona's model copies it into its reply.
+- **No step ID back.** It answers only `202`. Several inserts after the same step therefore end
+  up in reverse order (`X → C → B → A`), and a second insert can't be chained after the first.
+- **One firing per step.** A step's Worker fires only once per run, even when the step is
+  revisited, and inserted steps carry no Worker. So "one Worker call per CUA iteration" can't
+  be built as a loop either.
+- **The loop guard.** `src/engine/infinite-loop-guard.ts` stops after 100 automatic
+  transitions without human input, and every inserted step counts as one.
+
+What the agent server would need for live, narrated choreo steps from a Worker:
+1. Play steps a Worker inserts while that Worker is still running. The hold walks into
+   them, then returns to the Worker step.
+2. Return the new step's ID from `POST …/choreo/steps`, so inserts can be chained in order.
+3. A word-for-word step: no LLM call, the line written as it is. It could also take image or
+   file attachments in the body.
+4. Optionally, speak activity entries instead (a follow-up already listed in the agent
+   server's `docs/activity-narration.md`). This would also give spoken narration without
+   choreo steps.
+
+With 1–3 in place, the CUA side would be small:
+- `NarrationPublisher` would write `[desc]`, `[elements]` and `[decision]` as choreo steps,
+  using `config.context.choreoStepsUrl` and `insertAfterStepGuid` from the worker body.
+- The micro `[activity]` lines would stay in the activity.
