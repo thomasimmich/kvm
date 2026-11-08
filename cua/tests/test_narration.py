@@ -77,7 +77,8 @@ def test_publisher_narrates_screens_decisions_and_result(tmp_path):
     assert client.texts()[0] == "Starting: **open settings and the wi-fi page**"
     texts = [t for t in client.texts() if t.startswith("[")]
     tags = [t.split("]")[0] + "]" for t in texts]
-    assert tags[:2] == ["[activity]", "[screen:1]"]
+    assert tags[0] == "[activity]" and "[screen:1]" in tags
+    assert any("Jev answered in" in t for t in texts)
     assert "[desc:1]" in tags and "[elements:1]" in tags and "[decision:1]" in tags
     assert tags[-1] == "[result]"
     # the raw screenshot is uploaded before the entry that shows it

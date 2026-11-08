@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,7 +28,8 @@ class Settings(BaseSettings):
     cua_parser: Literal["omniparser", "ocr", "null"] = "omniparser"
     cua_device: Literal["auto", "mps", "cuda", "cpu"] = "auto"
     cua_weights_dir: Path = Path("weights")
-    cua_caption_icons: bool = True
+    # Florence-2 captions for icons without text: ~0.2 s per new icon (8–20 s on a new screen)
+    cua_caption_icons: bool = False
     cua_ocr: Literal["auto", "vision", "easyocr"] = "auto"  # auto = Apple Vision on macOS, else EasyOCR
 
     # Agent loop
@@ -49,7 +51,7 @@ class Settings(BaseSettings):
     cua_vision_provider: Literal["openai", "none"] = "openai"  # openai = any OpenAI-compatible API
     cua_vision_model: str = "gpt-4.1-mini"
     cua_vision_base_url: str = "https://api.openai.com/v1"
-    openai_api_key: str = ""
+    openai_api_key: str = Field("", validation_alias=AliasChoices("OPENAI_API_KEY", "LEANSCOPE_OPENAI_API_KEY"))
 
     # Live narration into a LeanScope agent-server session (off while these are empty)
     leanscope_agent_server_url: str = ""

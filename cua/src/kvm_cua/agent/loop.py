@@ -110,6 +110,7 @@ class Agent:
         self.settle_interval_s = settle_interval_s
         self.on_event = on_event
         self.describer = describer  # fast image-to-text model for a rough screen description
+        self.describe_off_reason = ""  # why there is no describer, said once per run
         self.last_screen: Screen | None = None
         self.lock = threading.Lock()  # one run (or manual action) at a time
         self._cancel = threading.Event()
@@ -124,7 +125,9 @@ class Agent:
 
     def observe(self, prev: Screen | None = None, after_seq: int = 0, settle: bool = True) -> Screen:
         """Screenshot once the screen stopped changing (animations, page loads), then parse it."""
+        t_shot = time.time()
         frame = self.device.screenshot(after_seq=after_seq)
+        stable = False
         if settle:
             deadline = time.time() + self.settle_timeout_s
             while time.time() < deadline:
@@ -134,9 +137,14 @@ class Agent:
                 frame = nxt
                 if stable:
                     break
+            if not stable and self.settle_timeout_s > 0:
+                self._say(f"Screen kept changing for {self.settle_timeout_s:.0f} s: taking it as it is")
+        self._say(f"Screenshot taken in {time.time() - t_shot:.1f} s" + (" (waited for the screen to settle)"
+                                                                              if settle else ""))  # fmt: skip
         phash = dhash(frame.image)
         self._emit({"type": "screen_raw", "seq": frame.seq, "_image": frame.image})
         self._maybe_describe(frame.image, frame.seq, phash)
+        self._say("Parsing the screen (OmniParser)")
         t0 = time.time()
         elements = self.parser.parse(frame.image)
         screen = Screen(
@@ -160,10 +168,15 @@ class Agent:
     def _maybe_describe(self, image: Image.Image, seq: int, phash: int) -> None:
         """Describe the screen in parallel to parsing, once per new view (first screen, page change)."""
         if self.describer is None:
+            if self.describe_off_reason and self._described_phash is None:
+                self._described_phash = phash  # say it once per run
+                self._say(f"No screen description: {self.describe_off_reason}")
             return
         if self._described_phash is not None and hamming(phash, self._described_phash) < DESCRIBE_MIN_CHANGE:
+            self._say("Same view as before: no new screen description")
             return
         self._described_phash = phash
+        self._say(f"Describing the screen ({getattr(self.describer, 'model', 'vision model')}), next to parsing")
         if self._describe_pool is None:
             self._describe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="describe")
         trace, describer = self._trace, self.describer
@@ -174,6 +187,7 @@ class Agent:
                 text = describer(image).strip()
             except Exception as e:  # noqa: BLE001 — narration must never break a run
                 log.warning("screen description failed: %s", e)
+                self._say(f"Screen description failed after {time.time() - t0:.1f} s: {e}")
                 return
             if not text:
                 return
@@ -328,6 +342,7 @@ class Agent:
                 t0 = time.time()
                 decision = self.decider.decide(ctx)
                 decide_ms = int((time.time() - t0) * 1000)
+                self._say(f"Jev answered in {decide_ms / 1000:.1f} s")
                 trace.event({"step": step, "option": decision.action.option, "confidence": decision.action.confidence,
                              "alternatives": decision.action.alternatives, "progress": decision.progress,
                              "decide_ms": decide_ms, "tokens": decision.tokens})  # fmt: skip
@@ -405,7 +420,9 @@ class Agent:
                     break
 
                 prev = screen
+                t_act = time.time()
                 self.execute(action, screen, inputs)
+                self._say(f"Done: {desc} ({time.time() - t_act:.1f} s)")
                 absorb()  # a pause right after the action holds before the screen is judged
                 self._say("Looking at the screen")
                 screen = self.observe(prev=prev, after_seq=prev.seq)

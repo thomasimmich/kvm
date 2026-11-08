@@ -105,6 +105,9 @@ class CuaService:
     def agent(self) -> Agent:
         if self._agent is None:
             s = self.settings
+            describer, off_reason = make_describer(
+                s.cua_vision_provider, s.openai_api_key, s.cua_vision_model, s.cua_vision_base_url
+            )
             self._agent = Agent(
                 self.device,
                 self.parser,
@@ -112,10 +115,9 @@ class CuaService:
                 Actuator(self.device, layout=s.kvm_keyboard_layout),
                 runs_dir=s.cua_runs_dir,
                 on_event=self._on_event,
-                describer=make_describer(
-                    s.cua_vision_provider, s.openai_api_key, s.cua_vision_model, s.cua_vision_base_url
-                ),
+                describer=describer,
             )
+            self._agent.describe_off_reason = off_reason
         return self._agent
 
     def _on_event(self, ev: dict) -> None:

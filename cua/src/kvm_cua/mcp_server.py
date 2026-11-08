@@ -138,7 +138,7 @@ def build_server(service: CuaService) -> MCPServer:
             "goal": live.goal,
             "running": live.running,
             "highlight": live.highlight,
-            "events": list(live.events)[-80:],
+            "events": list(live.events),
             "lastResult": live.last_result,
             "screen": None if scr is None else {
                 "seq": scr.seq, "size": scr.size, "parseMs": scr.parse_ms,

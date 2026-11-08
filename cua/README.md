@@ -151,8 +151,8 @@ See [docs/agent-server-integration.md](docs/agent-server-integration.md) for con
 |---|---|
 | YOLO icon detection | 0.1 s |
 | Apple Vision OCR | 0.5 s |
-| Florence-2 captions | about 0.2 s per *new* icon (cached by content, so repeated toolbars and taskbars are free) |
-| Typical screen | 0.4–8 s, depending on how many unseen icons it has |
+| Florence-2 captions (off by default, `CUA_CAPTION_ICONS=true`) | about 0.2 s per *new* icon (cached by content, so repeated toolbars and taskbars are free) |
+| Typical screen | about 0.4 s; with captions 8–20 s for a new screen, 0.4 s once its icons are cached |
 | Model loading | about 10 s, done once on first use |
 
 ## Code map

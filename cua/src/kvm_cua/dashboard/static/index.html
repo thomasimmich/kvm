@@ -31,7 +31,7 @@
   button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font: inherit; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
-  .log { max-height: 420px; overflow: auto; font-size: 13px; }
+  .log { max-height: 560px; overflow: auto; font-size: 13px; }
   .ev { padding: 6px 0; border-bottom: 1px solid var(--line); }
   .ev .t { color: var(--muted); font-size: 11px; margin-right: 6px; }
   .bar { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
@@ -95,7 +95,7 @@
       <div class="meta" id="rcMeta"></div>
     </section>
     <section>
-      <h2>Decisions</h2>
+      <h2>Activity log <span class="t" id="logCount" style="text-transform:none;letter-spacing:0;font-weight:normal"></span></h2>
       <div class="log" id="log"></div>
     </section>
     <section>
@@ -171,11 +171,19 @@ function renderNarration(n) {
   $("rcMeta").innerHTML = parts.join("<br>");
 }
 
+// The same lines the LeanScope session's activity gets (see narration/publisher.py), newest first.
+let lastEventKey = "";
 function renderEvents(events) {
   const log = $("log");
-  const shown = ["decision", "run_start", "run_end", "screen_description", "activity", "guidance_received",
-                 "paused", "resumed", "cancel_requested", "ask_human"];
-  const items = events.filter(e => shown.includes(e.type)).slice(-60).reverse();
+  const shown = ["decision", "run_start", "run_end", "screen", "screen_description", "activity", "guidance_received",
+                 "paused", "resumed", "cancel_requested", "ask_human", "ask_human_end"];
+  const all = events.filter(e => shown.includes(e.type));
+  const key = all.length + ":" + (all.length ? all[all.length - 1].ts : "");
+  if (key === lastEventKey) return;  // unchanged: keep the scroll position
+  lastEventKey = key;
+  const items = all.slice(-200).reverse();
+  $("logCount").textContent = `(${items.length} of ${all.length})`;
+  const scroll = log.scrollTop;
   log.innerHTML = "";
   for (const e of items) {
     const d = document.createElement("div");
@@ -185,11 +193,13 @@ function renderEvents(events) {
     let html = `<span class="t">${t}</span>`;
     if (e.type === "run_start") html += `<b>start</b> ${escapeHtml(e.goal)}`;
     else if (e.type === "activity") html += escapeHtml(e.text);
-    else if (e.type === "screen_description") html += `screen: ${escapeHtml(e.text)}`;
+    else if (e.type === "screen_description") html += `<b>screen description</b> <span class="t">(${((e.ms || 0) / 1000).toFixed(1)} s)</span>: ${escapeHtml(e.text)}`;
     else if (e.type === "guidance_received") html += `<b>you:</b> ${escapeHtml(e.text)}`;
     else if (e.type === "paused" || e.type === "resumed") html += `<b>${e.type}</b>`;
     else if (e.type === "cancel_requested") html += `<b>cancel requested</b>`;
-    else if (e.type === "ask_human") html += `<b>asks:</b> ${escapeHtml(e.question)}`;
+    else if (e.type === "ask_human") html += `<b>asks:</b> ${escapeHtml(e.question)} <span class="t">(waits ${e.wait_s} s)</span>`;
+    else if (e.type === "ask_human_end") html += e.answered ? "got an answer" : e.cancelled ? "cancelled while asking" : "no answer: going on alone";
+    else if (e.type === "screen") html += `screen parsed: ${e.elements} elements` + (e.new ? ` (${e.new} new)` : "") + ` in ${(e.parse_ms / 1000).toFixed(1)} s`;
     else if (e.type === "run_end") html += `<b>${escapeHtml(e.status)}</b> ${escapeHtml(e.message || "")}`;
     else {
       html += escapeHtml(e.action) + (e.confidence != null ? ` <span class="t">(${(e.confidence * 100).toFixed(0)}%)</span>` : "");
@@ -199,6 +209,7 @@ function renderEvents(events) {
     }
     d.innerHTML = html; log.appendChild(d);
   }
+  log.scrollTop = scroll;
 }
 function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 

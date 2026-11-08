@@ -70,10 +70,13 @@ class VisionDescriber:
     __call__ = describe
 
 
-def make_describer(provider: str, api_key: str, model: str, base_url: str) -> VisionDescriber | None:
+def make_describer(
+    provider: str, api_key: str, model: str, base_url: str
+) -> tuple[VisionDescriber | None, str]:
+    """The describer, or None and the reason it is off."""
     if provider == "none":
-        return None
+        return None, "turned off (CUA_VISION_PROVIDER=none)"
     if not api_key:
-        log.info("no OPENAI_API_KEY: screens are not described (set CUA_VISION_PROVIDER=none to silence)")
-        return None
-    return VisionDescriber(api_key, model, base_url)
+        log.warning("LEANSCOPE_OPENAI_API_KEY is not set: screens are not described")
+        return None, "LEANSCOPE_OPENAI_API_KEY is not set in .env (OPENAI_API_KEY works too)"
+    return VisionDescriber(api_key, model, base_url), ""
