@@ -48,9 +48,14 @@
 </header>
 <main>
   <section>
-    <h2>Remote screen</h2>
-    <img id="shot" alt="Latest parsed screen with numbered element boxes">
-    <div class="meta" id="screenMeta">no screen yet: press Observe</div>
+    <h2>Remote screen
+      <span style="float:right; text-transform:none; letter-spacing:0">
+        <button id="modeLive" type="button">Live</button>
+        <button id="modeParsed" type="button">Parsed</button>
+      </span>
+    </h2>
+    <img id="shot" alt="The remote screen" hidden onload="this.hidden=false">
+    <div class="meta" id="screenMeta">connecting to the KVM …</div>
   </section>
   <div style="display:grid; gap:12px; align-content:start; min-width:0">
     <section>
@@ -94,10 +99,32 @@ async function post(path, body) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.ok === false) alert(j.error || ("HTTP " + r.status));
 }
-$("run").onclick = () => post("/dashboard/api/run", {
+$("run").onclick = () => { setMode("parsed"); return post("/dashboard/api/run", {
   goal: $("goal").value, hints: lines($("hints").value), inputs: inputs($("inputs").value), expectText: $("expect").value,
-});
-$("observe").onclick = () => post("/dashboard/api/observe");
+}); };
+$("observe").onclick = () => { setMode("parsed"); post("/dashboard/api/observe"); };
+
+// Live: the raw screen every 2 s. Parsed: the last parsed screen with numbered element boxes.
+let mode = "live", liveBusy = false, parsedMeta = "";
+function setMode(m) {
+  mode = m;
+  $("modeLive").className = m === "live" ? "primary" : "";
+  $("modeParsed").className = m === "parsed" ? "primary" : "";
+  lastSeq = null;  // force a reload of the parsed image
+  if (m === "live") refreshLive();
+  else $("screenMeta").textContent = parsedMeta || "no parsed screen yet: press Observe";
+}
+$("modeLive").onclick = () => setMode("live");
+$("modeParsed").onclick = () => setMode("parsed");
+function refreshLive() {
+  if (mode !== "live" || liveBusy) return;
+  liveBusy = true;
+  const img = new Image();
+  img.onload = () => { liveBusy = false; if (mode === "live") { $("shot").src = img.src; $("screenMeta").textContent = "live · " + new Date().toLocaleTimeString(); } };
+  img.onerror = () => { liveBusy = false; if (mode === "live") $("screenMeta").textContent = "live view unavailable (is the KVM reachable and npm run deploy running?)"; };
+  img.src = "/dashboard/api/live.jpg?" + Date.now();
+}
+setInterval(refreshLive, 2000);
 $("cancel").onclick = () => post("/dashboard/api/cancel");
 
 function renderEvents(events) {
@@ -129,10 +156,11 @@ async function tick() {
     st.textContent = s.running ? "running: " + (s.goal || "") : res ? res.status : "idle";
     st.className = "pill " + (s.running ? "run" : res && res.status === "done" ? "done" : res && res.status === "error" ? "err" : "");
     $("decider").textContent = "decider: " + s.decider;
-    if (s.screen && (s.screen.seq !== lastSeq || s.highlight !== lastHighlight)) {
+    if (s.screen) parsedMeta = `parsed · ${s.screen.size[0]}×${s.screen.size[1]} · ${s.screen.elements.length} elements · parse ${s.screen.parseMs} ms · seq ${s.screen.seq}`;
+    if (mode === "parsed" && s.screen && (s.screen.seq !== lastSeq || s.highlight !== lastHighlight)) {
       lastSeq = s.screen.seq; lastHighlight = s.highlight;
       $("shot").src = "/dashboard/api/screen.jpg?" + Date.now();
-      $("screenMeta").textContent = `${s.screen.size[0]}×${s.screen.size[1]} · ${s.screen.elements.length} elements · parse ${s.screen.parseMs} ms · seq ${s.screen.seq}`;
+      $("screenMeta").textContent = parsedMeta;
     }
     renderEvents(s.events || []);
     if (res) $("result").textContent = `${res.status}: ${res.message}\n` + (res.steps || []).map(x => `${x.step}. ${x.action} → ${x.outcome}`).join("\n");
@@ -140,6 +168,7 @@ async function tick() {
   } catch (e) { /* server restarting */ }
   setTimeout(tick, 1000);
 }
+setMode("live");
 tick();
 </script>
 </body>

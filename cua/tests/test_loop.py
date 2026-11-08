@@ -123,3 +123,22 @@ def test_find_element_tolerates_ocr_typos():
     assert find_element(screen, "sammlungen").id == 1  # exact substring still wins
     assert find_element(screen, "Zuletzt gesichrt").id == 2
     assert find_element(screen, "Papierkorb") is None
+
+
+def test_click_that_only_closed_a_menu_is_detected():
+    from PIL import Image
+
+    from kvm_cua.agent.loop import _click_only_closed_popup
+    from kvm_cua.perception.types import Screen
+
+    img = Image.new("RGB", (800, 600))
+    sidebar = [("WLAN", (10, 100, 200, 130)), ("Allgemein", (10, 140, 200, 170))]
+    menu = [("Über", (20, 20, 300, 40)), ("Beenden", (20, 50, 300, 70)), ("Dienste", (20, 80, 300, 95))]
+    with_menu = Screen(img, elements(sidebar + menu), new_element_ids=[2, 3, 4])
+    closed = Screen(img, elements(sidebar))
+
+    again = _click_only_closed_popup(with_menu, closed, element_id=0)
+    assert again is not None and again.label == "WLAN"
+    assert _click_only_closed_popup(with_menu, with_menu, element_id=0) is None  # menu still open
+    assert _click_only_closed_popup(with_menu, closed, element_id=3) is None  # clicked inside the menu
+    assert _click_only_closed_popup(Screen(img, elements(sidebar)), closed, element_id=0) is None  # no menu

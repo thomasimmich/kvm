@@ -26,5 +26,7 @@
   no effect and of scrolls that reached the end, and run traces on disk.
 - **MCP server:** a Streamable-HTTP server with 7 tools and the prompt
   `additional_agent_instructions`, plus a live dashboard and a `cua` CLI.
+- **Menus:** a click outside an open menu (which on macOS only closes the menu) is repeated
+  once instead of being judged a failure. Jev now also sees which elements appeared after an action.
 - **Clicking by text** tolerates small OCR misreads, for example when the pointer covers a letter.
 - **Device-free testing:** `--fake` replays screenshots instead of talking to a real device.

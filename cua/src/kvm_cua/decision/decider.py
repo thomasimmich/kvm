@@ -169,7 +169,9 @@ NEXT_INSTRUCTIONS = (
     "You are operating a computer on behalf of a user, through mouse and keyboard only. "
     "Pick the single next action that makes the most progress toward the GOAL on the CURRENT SCREEN. "
     "Prefer elements whose label matches the goal or the hints; follow the hints' advice about the application. "
-    "Do not repeat actions that already failed. Choose 'done' only when the goal is visibly achieved."
+    "Do not repeat actions that already failed. Choose 'done' only when the goal is visibly achieved. "
+    "Once the app the goal needs is open, prefer elements inside its window: the app's name in the menu bar "
+    "only opens a menu with About, Hide and Quit."
 )
 
 PROGRESS_INSTRUCTIONS = (

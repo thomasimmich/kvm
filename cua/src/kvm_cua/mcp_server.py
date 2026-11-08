@@ -11,6 +11,7 @@ The same process also serves a small live dashboard under /dashboard.
 from __future__ import annotations
 
 import hmac
+import io
 import ipaddress
 import logging
 import threading
@@ -148,6 +149,21 @@ def build_server(service: CuaService) -> MCPServer:
         data = service.annotated_jpeg()
         if data is None:
             return PlainTextResponse("no screen yet", status_code=404)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @mcp.custom_route("/dashboard/api/live.jpg", methods=["GET"])
+    async def dashboard_live(_: Request) -> Response:
+        """The current screen without parsing (about 0.3 s), for the dashboard's live view."""
+
+        def grab() -> bytes:
+            buf = io.BytesIO()
+            service.device.screenshot().image.save(buf, "JPEG", quality=80)
+            return buf.getvalue()
+
+        try:
+            data = await blocking(grab)
+        except Exception as e:  # noqa: BLE001 — shown in the dashboard
+            return PlainTextResponse(str(e), status_code=503)
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @mcp.custom_route("/dashboard/api/observe", methods=["POST"])

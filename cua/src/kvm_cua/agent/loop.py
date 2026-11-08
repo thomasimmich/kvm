@@ -287,6 +287,15 @@ class Agent:
                 self.execute(action, screen, inputs)
                 screen = self.observe(prev=prev, after_seq=prev.seq)
                 stem = trace.screen(screen)
+                again = _click_only_closed_popup(prev, screen, action.element_id) if action.kind == "click" else None
+                if again is not None:
+                    # macOS (and many menus elsewhere) swallow a click outside an open menu:
+                    # it only closes the menu. Click the same element once more.
+                    self.actuator.click(*again.center)
+                    screen = self.observe(prev=screen, after_seq=screen.seq)
+                    stem = trace.screen(screen)
+                    desc += " (first click only closed the open menu, clicked again)"
+                    rec.action = desc
                 changed = screens_differ(prev.image, screen.image)
 
                 if action.kind == "scroll":
@@ -334,6 +343,23 @@ class Agent:
 
 
 _OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
+
+
+def _click_only_closed_popup(prev: Screen, now: Screen, element_id: int | None) -> UIElement | None:
+    """If the click landed outside a menu/popup that had just appeared, the popup is gone and the
+    clicked element is still in place, the click was spent on closing the popup. Returns the
+    element on the new screen to click again, else None."""
+    popup = set(prev.new_element_ids)
+    if element_id is None or not popup or element_id in popup:
+        return None
+    target = prev.element(element_id)
+    if target is None:
+        return None
+    popup_labels = {e.label for e in prev.elements if e.id in popup}
+    still_open = popup_labels & {e.label for e in now.elements}
+    if len(still_open) > 0.3 * len(popup_labels):
+        return None
+    return next((e for e in now.elements if e.label == target.label and iou(e.bbox, target.bbox) > 0.5), None)
 
 
 def _visible(text: str, screen: Screen) -> bool:
