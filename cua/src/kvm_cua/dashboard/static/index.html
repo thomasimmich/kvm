@@ -448,16 +448,18 @@ async function loadChoreos(repoId, guid) {
     choreos = await api("/dashboard/api/leanscope/choreos?repositoryId=" + encodeURIComponent(repoId));
     fillSelect(c, choreos.map(x => [x.guid, x.title]), guid, choreos.length ? "— pick a choreo —" : "— no choreos —");
     hint(choreos.length ? "" : "This repository has no scenario of type Choreo. Set the scenario's type to Choreo in LeanScope.");
+    prefillGoal(true);
     loadPersona();
   } catch (e) { fillSelect(c, [], "", "—"); hint(e.message, true); }
   c.disabled = false;
 }
 // The picked choreo's goal (personaGoal) and hints (preconditions) go into the goal fields; still editable.
-function prefillGoal() {
+// onlyEmpty: when a saved choreo is restored on load, fill only empty fields so edits are kept.
+function prefillGoal(onlyEmpty) {
   const c = choreos.find(x => x.guid === $("lsChoreo").value);
   if (!c) return;
-  if (c.goal) $("goal").value = c.goal;
-  if (c.hints && c.hints.length) $("hints").value = c.hints.join("\n");
+  if (c.goal && !(onlyEmpty && $("goal").value)) $("goal").value = c.goal;
+  if (c.hints && c.hints.length && !(onlyEmpty && $("hints").value)) $("hints").value = c.hints.join("\n");
 }
 async function saveSelection() {
   const o = $("lsChoreo").selectedOptions[0];
