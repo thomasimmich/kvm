@@ -37,9 +37,13 @@ class Settings(BaseSettings):
     cua_runs_dir: Path = Path("runs")
 
     # MCP server
-    cua_mcp_host: str = "127.0.0.1"
+    # "lan": listen on all interfaces and show this machine's LAN address (192.168.…);
+    # 127.0.0.1 keeps it local. Off loopback a token is required: without CUA_MCP_TOKEN one is
+    # made once and kept in cua_mcp_token_file. Loopback clients need no token then.
+    cua_mcp_host: str = "lan"
     cua_mcp_port: int = 8765
     cua_mcp_token: str = ""
+    cua_mcp_token_file: Path = Path(".cua-mcp-token")  # git-ignored
 
     # Dashboard
     cua_dashboard_port: int = 8766
@@ -86,9 +90,34 @@ class Settings(BaseSettings):
         return bool(self.leanscope_agent_server_url)
 
     @property
+    def bind_host(self) -> str:
+        """The address the server listens on."""
+        return "0.0.0.0" if self.cua_mcp_host == "lan" else self.cua_mcp_host
+
+    @property
+    def public_host(self) -> str:
+        """The address others reach the server at: the LAN address when listening on all interfaces."""
+        if self.bind_host in ("0.0.0.0", "::"):
+            return lan_ip() or "127.0.0.1"
+        return self.cua_mcp_host
+
+    @property
     def worker_dispatch_url(self) -> str:
-        base = (self.cua_public_url or f"http://{self.cua_mcp_host}:{self.cua_mcp_port}").rstrip("/")
+        base = (self.cua_public_url or f"http://{self.public_host}:{self.cua_mcp_port}").rstrip("/")
         return base + "/worker/dispatch" + (f"?key={self.cua_worker_key}" if self.cua_worker_key else "")
+
+
+def lan_ip() -> str:
+    """This machine's address on the local network: the source address of a route to the
+    internet (connecting a UDP socket sends nothing)."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("10.255.255.255", 1))
+            return sock.getsockname()[0]
+    except OSError:
+        return ""
 
 
 @lru_cache

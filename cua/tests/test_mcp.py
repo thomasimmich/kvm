@@ -64,6 +64,33 @@ def test_bearer_auth(tmp_path):
         assert c.post("/mcp", json={}).status_code == 401
 
 
+def test_lan_serve_makes_and_keeps_a_token(tmp_path):
+    from kvm_cua.mcp_server import build_app
+
+    def lan_service():
+        svc = service(tmp_path)
+        svc.settings.cua_mcp_host = "lan"
+        svc.settings.cua_mcp_token_file = tmp_path / "token"
+        return svc
+
+    svc = lan_service()
+    assert svc.settings.bind_host == "0.0.0.0"
+    with TestClient(build_app(svc), client=("192.168.1.9", 1234)) as c:
+        assert c.get("/dashboard/api/state").status_code == 401
+        token = svc.settings.cua_mcp_token
+        assert token and c.get(f"/dashboard?token={token}").status_code == 200
+    from kvm_cua.config import lan_ip
+
+    if lan_ip():  # the local browser on the LAN address needs no token either
+        with TestClient(build_app(lan_service()), client=(lan_ip(), 1234)) as c:
+            assert c.get("/dashboard/api/state").status_code == 200
+    again = lan_service()
+    with TestClient(build_app(again), client=("127.0.0.1", 1234)) as c:
+        assert again.settings.cua_mcp_token == token  # kept across restarts
+        assert c.get("/dashboard/api/state").status_code == 200
+        assert c.post("/mcp", json={}).status_code != 401  # local clients need no token
+
+
 def test_dashboard_pointer_wheel_and_sphero(tmp_path):
     from test_sphero import FakeSphero
 
@@ -122,3 +149,16 @@ def test_dashboard_reset(tmp_path):
         assert c.post("/dashboard/api/reset").json() == {"ok": True}
         st = c.get("/dashboard/api/state").json()
         assert st["events"] == [] and st["lastResult"] is None
+
+
+def test_free_port_skips_a_busy_one():
+    import socket
+
+    from kvm_cua.mcp_server import free_port
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        assert free_port("127.0.0.1", port) != port
+        assert free_port("127.0.0.1", port, avoid={port + 1}) not in (port, port + 1)

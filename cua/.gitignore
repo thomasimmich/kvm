@@ -7,3 +7,4 @@ weights/
 .pytest_cache/
 .ruff_cache/
 .sphero-mouse.json
+.cua-mcp-token

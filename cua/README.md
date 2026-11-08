@@ -76,7 +76,7 @@ uv run cua scroll down --notches 5
 uv run cua type "hello world" && uv run cua press enter
 uv run cua run "Open System Settings and show the Wi-Fi page" \
     --hint "Settings is the gear icon in the Dock" --expect "Wi-Fi"
-uv run cua serve                                   # MCP at :8765/mcp, dashboard at :8765/dashboard
+uv run cua serve                                   # MCP at :8765/mcp, dashboard at :8765/dashboard (LAN address)
 ```
 
 The **dashboard** (`http://127.0.0.1:8765/dashboard`) shows:

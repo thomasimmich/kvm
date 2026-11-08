@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> None:
     m.add_argument("y", type=float)
 
     sv = sub.add_parser("serve", help="MCP server (/mcp) + dashboard (/dashboard)")
-    sv.add_argument("--host")
+    sv.add_argument("--host", help="lan (default: all interfaces, LAN address shown) or an address")
     sv.add_argument("--port", type=int)
 
     args = p.parse_args(argv)

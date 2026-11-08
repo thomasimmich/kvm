@@ -27,6 +27,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent.inbox import Command, parse_command
+from .config import lan_ip
 from .kvm.sphero import SpheroError
 from .narration.leanscope_auth import ChoreoSelection, LeanScopeError
 from .narration.session import qr_svg
@@ -160,10 +161,10 @@ def build_server(service: CuaService) -> MCPServer:
         """The dashboard's address on the local network (with the token) and its QR code, for the
         header LED. Only reached by the local browser or a client that already has the token."""
         s = service.settings
-        if _is_loopback(s.cua_mcp_host):
+        if _is_loopback(s.bind_host):
             return JSONResponse({"lan": False, "port": s.cua_mcp_port})
-        ip = s.cua_mcp_host if s.cua_mcp_host not in ("0.0.0.0", "::") else _lan_ip()
-        if not ip:
+        ip = s.public_host
+        if _is_loopback(ip):
             return JSONResponse({"lan": False, "port": s.cua_mcp_port, "error": "no network address found"})
         token = f"?token={s.cua_mcp_token}" if s.cua_mcp_token else ""
         url = f"http://{ip}:{s.cua_mcp_port}/dashboard{token}"
@@ -357,7 +358,7 @@ def build_server(service: CuaService) -> MCPServer:
         if key:
             if not hmac.compare_digest(request.query_params.get("key", "").encode(), key.encode()):
                 return JSONResponse({"error": "wrong or missing ?key="}, status_code=401)
-        elif not _is_loopback(request.client.host if request.client else ""):
+        elif not _is_this_machine(request.client.host if request.client else ""):
             return JSONResponse({"error": "set CUA_WORKER_KEY to accept remote dispatches"}, status_code=401)
         if service.narration is None:
             return JSONResponse({"error": "narration is off: set LEANSCOPE_AGENT_SERVER_URL"}, status_code=503)
@@ -446,9 +447,10 @@ class BearerAuth:
     sets a cookie.
     """
 
-    def __init__(self, app: ASGIApp, token: str):
+    def __init__(self, app: ASGIApp, token: str, open_to_loopback: bool = False):
         self.app = app
         self.token = token.encode()
+        self.open_to_loopback = open_to_loopback  # every route, not just the dashboard
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not self.token:
@@ -457,9 +459,11 @@ class BearerAuth:
         path = req.url.path
         if path == "/healthz" or path.startswith("/worker/"):  # /worker/* checks CUA_WORKER_KEY itself
             return await self.app(scope, receive, send)
+        if self.open_to_loopback and _is_this_machine(req.client.host if req.client else ""):
+            return await self.app(scope, receive, send)
         given = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
         if path.startswith("/dashboard"):
-            if _is_loopback(req.client.host if req.client else ""):
+            if _is_this_machine(req.client.host if req.client else ""):
                 return await self.app(scope, receive, send)
             given = given or req.query_params.get("token", "") or req.cookies.get("cua_token", "")
         if given and hmac.compare_digest(given.encode(), self.token):
@@ -490,32 +494,100 @@ def _is_loopback(host: str) -> bool:
         return host in ("localhost", "testclient")
 
 
-def _lan_ip() -> str:
-    """This machine's address on the local network: the source address of a route to the
-    internet (connecting a UDP socket sends nothing)."""
+def _is_this_machine(host: str) -> bool:
+    """A client on this machine: loopback, or one of this machine's own addresses (a local
+    browser that opened the LAN address)."""
+    if _is_loopback(host):
+        return True
     import socket
 
+    if host == lan_ip():
+        return True
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("10.255.255.255", 1))
-            return sock.getsockname()[0]
+        own = {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None)}
     except OSError:
-        return ""
+        own = set()
+    return host in own
+
+
+def _kept_token(path: Path) -> str:
+    """The token made for serving on the network without CUA_MCP_TOKEN, made once and kept."""
+    import secrets
+
+    try:
+        token = path.read_text().strip()
+    except OSError:
+        token = ""
+    if not token:
+        token = secrets.token_urlsafe(18)
+        path.write_text(token + "\n")
+        path.chmod(0o600)
+    return token
 
 
 def build_app(service: CuaService):
     s = service.settings
     mcp = build_server(service)
-    app = mcp.streamable_http_app(host=s.cua_mcp_host)
-    if not s.cua_mcp_token and not _is_loopback(s.cua_mcp_host):
-        raise SystemExit("refusing to serve on a non-loopback host without CUA_MCP_TOKEN")
-    return BearerAuth(app, s.cua_mcp_token)
+    app = mcp.streamable_http_app(host=s.bind_host)
+    if s.cua_mcp_token or _is_loopback(s.bind_host):
+        return BearerAuth(app, s.cua_mcp_token)
+    # On the network without a configured token: loopback clients (the local agent server,
+    # the local browser) stay as before, everyone else needs the kept token.
+    s.cua_mcp_token = _kept_token(s.cua_mcp_token_file)
+    return BearerAuth(app, s.cua_mcp_token, open_to_loopback=True)
+
+
+def _port_free(host: str, port: int) -> bool:
+    """True when the server could listen on host:port (checked the way uvicorn binds) and
+    nothing answers there on loopback either."""
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+    except OSError:
+        return False
+    try:  # a server on 127.0.0.1 alone does not stop a bind on 0.0.0.0, but would catch local clients
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return False
+    except OSError:
+        return True
+
+
+def free_port(host: str, port: int, avoid: set[int] = frozenset(), tries: int = 20) -> int:
+    """The first port from `port` on that is free, skipping `avoid`."""
+    for p in range(port, port + tries):
+        if p not in avoid and _port_free(host, p):
+            return p
+    raise SystemExit(f"no free port in {port}–{port + tries - 1} on {host}")
 
 
 def serve(service: CuaService) -> None:
     import uvicorn
 
     s = service.settings
-    log.info("MCP endpoint: http://%s:%d/mcp   dashboard: http://%s:%d/dashboard",
-             s.cua_mcp_host, s.cua_mcp_port, s.cua_mcp_host, s.cua_mcp_port)  # fmt: skip
-    uvicorn.run(build_app(service), host=s.cua_mcp_host, port=s.cua_mcp_port, log_level="info")
+    port = free_port(s.bind_host, s.cua_mcp_port, avoid={s.cua_dashboard_port})
+    if port != s.cua_mcp_port:
+        log.warning("port %d is in use, serving on %d instead", s.cua_mcp_port, port)
+        s.cua_mcp_port = port  # the dashboard's QR code and the worker dispatch URL follow
+    app = build_app(service)
+    base = f"http://{s.public_host}:{s.cua_mcp_port}"
+    token = f"?token={s.cua_mcp_token}" if s.cua_mcp_token and not _is_loopback(s.bind_host) else ""
+    ready = (
+        "\n"
+        f"  CUA is ready\n"
+        f"  Dashboard:     {base}/dashboard\n"
+        + (f"  Other devices: {base}/dashboard{token}\n" if token else "")
+        + f"  MCP endpoint:  {base}/mcp\n"
+    )
+
+    class Server(uvicorn.Server):
+        async def startup(self, sockets=None) -> None:
+            await super().startup(sockets)
+            if self.started:  # listening; not when the bind failed
+                log.info(ready)
+
+    config = uvicorn.Config(app, host=s.bind_host, port=s.cua_mcp_port, log_level="info")
+    Server(config).run()
