@@ -87,7 +87,7 @@ class HttpKvm:
     def __init__(self, base_url: str, token: str, timeout_s: float = 10.0,
                  transport: httpx.BaseTransport | None = None):  # fmt: skip
         if not token:
-            raise KvmError("KVM_TOKEN is empty — enable the CUA API on the device first (see cua/README.md)")
+            raise KvmError("KVM_TOKEN is empty — enter the token in the dashboard's LeanScope dongle section (see cua/README.md)")
         self._client = httpx.Client(
             base_url=base_url.rstrip("/") + "/api/cua",
             headers={"Authorization": f"Bearer {token}"},

@@ -8,3 +8,4 @@ weights/
 .ruff_cache/
 .sphero-mouse.json
 .cua-mcp-token
+.kvm-device.json

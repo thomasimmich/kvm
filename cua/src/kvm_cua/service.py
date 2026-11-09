@@ -20,6 +20,7 @@ from .config import Settings
 from .decision.decider import Decider, JevDecider, StubDecider
 from .decision.jev import JevClient
 from .kvm.actuation import Actuator
+from .kvm.connection import KvmConnection, explain_kvm_error, normalize_kvm_url
 from .kvm.device import HttpKvm, KvmDevice, WheelEvent
 from .kvm.sphero import SpheroMirror
 from .narration.agent_server import AgentServerClient
@@ -61,6 +62,9 @@ class CuaService:
     ):
         self.settings = settings
         self._device = device
+        self.kvm = KvmConnection(settings.cua_kvm_state_file, settings.kvm_url, settings.kvm_token)
+        self.kvm_factory = lambda url, token: HttpKvm(url, token, settings.kvm_timeout_s)
+        self.kvm_status: dict = {}  # last check: {ok, kind, error, ts}; empty until the first one
         self._parser = parser
         self._decider = decider
         self._agent: Agent | None = None
@@ -115,9 +119,50 @@ class CuaService:
     @property
     def device(self) -> KvmDevice:
         if self._device is None:
-            s = self.settings
-            self._device = HttpKvm(s.kvm_url, s.kvm_token, s.kvm_timeout_s)
+            self._device = self.kvm_factory(self.kvm.url, self.kvm.token)
         return self._device
+
+    # --- JetKVM address and token from the dashboard -----------------------------------
+
+    def note_kvm(self, error: Exception | None) -> dict:
+        """Records whether the last request to the JetKVM worked (the dashboard's JetKVM card)."""
+        if error is None:
+            self.kvm_status = {"ok": True, "kind": "", "error": "", "ts": time.time()}
+        else:
+            kind, text = explain_kvm_error(error, self.kvm.url)
+            self.kvm_status = {"ok": kind == "signal", "kind": kind, "error": text, "ts": time.time()}
+        return self.kvm_status
+
+    def kvm_state(self) -> dict:
+        return {**self.kvm.snapshot(), "status": self.kvm_status}
+
+    def connect_kvm(self, url: str, token: str = "") -> dict:
+        """Saves the JetKVM's address and token (an empty token keeps the saved one), then checks
+        them. Saved even when the check fails, so the live view picks them up once the API is on."""
+        url = normalize_kvm_url(url)
+        if not url:
+            raise ValueError("enter the LeanScope dongle's IP address, e.g. 192.168.1.50")
+        token = token.strip() or self.kvm.token
+        if self.live.running:
+            raise Busy("the agent is running: cancel it first")
+        agent = self._agent
+        if agent is not None and not agent.lock.acquire(timeout=2.0):
+            raise Busy("the agent is busy with an action")
+        try:
+            self.kvm.save(url, token)
+            old, self._device, self._agent = self._device, None, None  # rebuilt with the new device on use
+        finally:
+            if agent is not None:
+                agent.lock.release()
+        close = getattr(old, "close", None)
+        if close is not None:
+            close()
+        try:
+            self.device.screen_size()  # one /state request; also fails on an empty token
+            self.note_kvm(None)
+        except Exception as e:  # noqa: BLE001 — explained on the dashboard
+            self.note_kvm(e)
+        return self.kvm_state()
 
     @property
     def parser(self) -> UIParser:

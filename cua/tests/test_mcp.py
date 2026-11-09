@@ -18,7 +18,12 @@ SETTINGS = [("General", (20, 100, 200, 140))]
 def service(tmp_path):
     imgs = [make_screen(HOME), make_screen(SETTINGS)]
     parser = FixtureParser([elements(HOME), elements(SETTINGS)]).bind(imgs)
-    s = Settings(cua_runs_dir=tmp_path, cua_sphero_state_file=tmp_path / "sphero.json", _env_file=None)
+    s = Settings(
+        cua_runs_dir=tmp_path,
+        cua_sphero_state_file=tmp_path / "sphero.json",
+        cua_kvm_state_file=tmp_path / "kvm.json",
+        _env_file=None,
+    )
     svc = CuaService(s, device=FakeKvm(imgs), parser=parser, decider=StubDecider(done_when="general"))
     svc.agent.settle_interval_s = svc.agent.settle_timeout_s = 0.0
     return svc
@@ -149,6 +154,61 @@ def test_dashboard_reset(tmp_path):
         assert c.post("/dashboard/api/reset").json() == {"ok": True}
         st = c.get("/dashboard/api/state").json()
         assert st["events"] == [] and st["lastResult"] is None
+
+
+def test_dashboard_kvm_saves_checks_and_explains(tmp_path):
+    import httpx
+
+    from kvm_cua.kvm.device import HttpKvm
+
+    seen = {}  # token → answer of the fake JetKVM
+
+    def device(request: httpx.Request) -> httpx.Response:
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+        if request.url.host == "10.0.0.99":
+            raise httpx.ConnectError("no route")
+        if seen.get("disabled"):
+            return httpx.Response(404, json={"error": "CUA API is disabled"})
+        if token != "good-token-1234":
+            return httpx.Response(401, json={"error": "invalid or missing bearer token"})
+        return httpx.Response(200, json={"video": {"width": 800, "height": 600}})
+
+    svc = service(tmp_path)
+    svc.kvm_factory = lambda url, token: HttpKvm(url, token, transport=httpx.MockTransport(device))
+    with TestClient(build_server(svc).streamable_http_app(host="127.0.0.1")) as c:
+        k = c.get("/dashboard/api/kvm").json()["result"]
+        assert k["tokenSet"] is False and "setCuaApiConfig" in k["snippet"]
+        assert c.post("/dashboard/api/kvm", json={"url": " "}).status_code == 400
+
+        k = c.post("/dashboard/api/kvm", json={"url": "10.0.0.5"}).json()["result"]
+        assert k["url"] == "http://10.0.0.5" and k["status"]["kind"] == "token"
+
+        k = c.post("/dashboard/api/kvm", json={"url": "http://10.0.0.5/", "token": "wrong"}).json()["result"]
+        assert k["status"] == {**k["status"], "ok": False, "kind": "token"}
+
+        k = c.post("/dashboard/api/kvm", json={"url": "10.0.0.5", "token": " good-token-1234 "}).json()[
+            "result"
+        ]
+        assert k["status"]["ok"] is True and k["tokenEnd"] == "1234" and k["source"] == "dashboard"
+        assert svc.device.screen_size() == (800, 600)
+
+        seen["disabled"] = True  # an empty token keeps the saved one
+        k = c.post("/dashboard/api/kvm", json={"url": "10.0.0.5"}).json()["result"]
+        assert k["status"]["kind"] == "api_off" and k["tokenSet"] is True
+
+        k = c.post("/dashboard/api/kvm", json={"url": "10.0.0.99"}).json()["result"]
+        assert k["status"]["kind"] == "network" and "10.0.0.99" in k["status"]["error"]
+
+        assert "good-token" not in c.get("/dashboard/api/state").text  # never sent to the browser
+        svc.live.running = True
+        assert c.post("/dashboard/api/kvm", json={"url": "10.0.0.5"}).status_code == 409
+
+    # kept across restarts, ahead of .env
+    s = Settings(
+        kvm_url="http://1.2.3.4", kvm_token="env", cua_kvm_state_file=tmp_path / "kvm.json", _env_file=None
+    )
+    again = CuaService(s, device=FakeKvm([make_screen(HOME)]))
+    assert (again.kvm.url, again.kvm.token) == ("http://10.0.0.99", "good-token-1234")
 
 
 def test_free_port_skips_a_busy_one():

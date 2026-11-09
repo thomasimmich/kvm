@@ -13,9 +13,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # JetKVM device (firmware /api/cua)
+    # JetKVM device (firmware /api/cua). Defaults only: the dashboard's JetKVM section overrides
+    # both and keeps them in cua_kvm_state_file.
     kvm_url: str = "http://jetkvm.local"
     kvm_token: str = ""
+    cua_kvm_state_file: Path = Path(".kvm-device.json")  # git-ignored
     kvm_keyboard_layout: str = "en-US"
     kvm_timeout_s: float = 10.0
 

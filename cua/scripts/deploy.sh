@@ -6,11 +6,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-# The KVM address comes from cua/.env (KVM_URL), unless KVM_IP is set.
+# The KVM address: KVM_IP if set, else the one saved in the dashboard (cua/.kvm-device.json),
+# else KVM_URL from cua/.env.
+if [ -z "${KVM_IP:-}" ] && [ -f cua/.kvm-device.json ]; then
+  KVM_IP=$(sed -nE 's#.*"url": *"https?://([^:/"]*).*#\1#p' cua/.kvm-device.json)
+fi
 if [ -z "${KVM_IP:-}" ] && [ -f cua/.env ]; then
   KVM_IP=$(sed -nE 's#^KVM_URL=https?://([^:/]*).*#\1#p' cua/.env)
 fi
-: "${KVM_IP:?set KVM_URL in cua/.env or KVM_IP in the environment}"
+: "${KVM_IP:?enter the JetKVM in the dashboard, set KVM_URL in cua/.env or KVM_IP in the environment}"
 
 if ! colima status x86build >/dev/null 2>&1; then
   echo "▶ Starting the x86 build VM (colima x86build) ..."

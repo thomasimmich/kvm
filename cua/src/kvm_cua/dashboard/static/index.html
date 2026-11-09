@@ -78,6 +78,15 @@
   #lanQr svg { width: 100%; height: auto; display: block; margin: 8px 0; border-radius: 4px; }
   #lanPop code { font-size: 12px; }
   a { color: var(--accent); word-break: break-all; }
+  .kvmState { float: right; text-transform: none; letter-spacing: 0; font-weight: normal; font-size: 12px; }
+  .kvmState.ok { color: var(--ok); } .kvmState.bad { color: var(--bad); } .kvmState.warn { color: var(--warn); }
+  #kvmHelp { margin-top: 10px; font-size: 13px; }
+  #kvmHelp summary { cursor: pointer; color: var(--accent); }
+  #kvmHelp ol { padding-left: 18px; margin: 8px 0; }
+  #kvmHelp li { margin-bottom: 6px; }
+  #kvmSnippet { margin: 6px 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 11px; }
+  #kvmCopy { padding: 3px 10px; font-size: 12px; }
+  kbd { font: 12px ui-monospace, monospace; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -104,10 +113,36 @@
       <img id="shot" alt="The remote screen" hidden onload="this.hidden=false" draggable="false">
       <div id="dot" hidden title="Pointer"></div>
     </div>
-    <div class="meta" id="screenMeta">connecting to the KVM …</div>
+    <div class="meta" id="screenMeta">connecting to the LeanScope dongle …</div>
     <div class="meta" id="ctlMeta"></div>
   </section>
   <div style="display:grid; gap:12px; align-content:start; min-width:0">
+    <section id="kvm">
+      <h2>LeanScope dongle <span class="kvmState" id="kvmState"></span></h2>
+      <form id="kvmForm">
+        <label for="kvmUrl">IP address (shown on the dongle's display)</label>
+        <input id="kvmUrl" placeholder="e.g. 192.168.1.50" autocomplete="off" spellcheck="false">
+        <label for="kvmToken">CUA token</label>
+        <input id="kvmToken" type="password" autocomplete="off" spellcheck="false" placeholder="paste the token">
+        <div class="row"><button class="primary" id="kvmConnect" type="submit">Save and connect</button></div>
+      </form>
+      <div class="meta" id="kvmMeta"></div>
+      <details id="kvmHelp">
+        <summary>Where do I get these?</summary>
+        <ol>
+          <li><b>IP address:</b> the dongle shows it on its small display. This computer must be on the same network.</li>
+          <li><b>Token:</b> open the <a id="kvmUiLink" href="#" target="_blank" rel="noopener">dongle's web UI</a>, open the browser
+            console there (Chrome on a Mac: <kbd>⌥⌘J</kbd>, Windows: <kbd>Ctrl+Shift+J</kbd>), paste this line and press Enter.
+            It turns the CUA API on and shows the token in a small dialog, already selected: copy it with <kbd>⌘C</kbd>.
+            <pre id="kvmSnippet"></pre>
+            <button type="button" id="kvmCopy">Copy the line</button>
+            <div class="meta">Chrome may first ask you to type <code>allow pasting</code> in the console.</div></li>
+          <li>Paste the token above and press <b>Save and connect</b>.</li>
+        </ol>
+        <div class="meta">The token stays the same across reboots and firmware deploys. The address and token are kept in
+          <code id="kvmFile">.kvm-device.json</code> and take precedence over <code>KVM_URL</code> / <code>KVM_TOKEN</code> in <code>.env</code>.</div>
+      </details>
+    </section>
     <section id="ls" hidden>
       <h2>LeanScope</h2>
       <form id="lsLogin" hidden>
@@ -368,6 +403,47 @@ $("spUrl").oninput = () => { $("spUrl").dataset.dirty = "1"; };
 $("spUrl").onkeydown = (e) => { if (e.key === "Enter") spConnect(); };
 $("spConnect").onclick = spConnect;
 $("spStop").onclick = async () => { try { renderSphero(await api("/dashboard/api/sphero/stop", {})); } catch (e) { alert(e.message); } };
+// The JetKVM's address and token. The help opens by itself while the API is off or the token is missing or wrong.
+const kvmHost = (url) => String(url || "").replace(/^http:\/\//, "");
+let kvmHelpKind = null;
+function renderKvm(k) {
+  if (!k) return;
+  const st = k.status || {};
+  if (document.activeElement !== $("kvmUrl") && !$("kvmUrl").dataset.dirty) { $("kvmUrl").value = kvmHost(k.url); kvmLink(); }
+  $("kvmToken").placeholder = k.tokenSet ? `saved${k.tokenEnd ? " (…" + k.tokenEnd + ")" : ""}: leave empty to keep it` : "paste the token";
+  const s = $("kvmState");
+  if (!k.tokenSet) { s.textContent = "no token"; s.className = "kvmState bad"; }
+  else if (st.ok === undefined) { s.textContent = "not checked yet"; s.className = "kvmState"; }
+  else if (st.ok) { s.textContent = st.kind === "signal" ? "connected · no picture" : "connected"; s.className = "kvmState " + (st.kind ? "warn" : "ok"); }
+  else { s.textContent = "not connected"; s.className = "kvmState bad"; }
+  $("kvmMeta").innerHTML = st.error ? `<span style="color:var(${st.ok ? "--warn" : "--bad"})">${escapeHtml(st.error)}</span>` : "";
+  $("kvmFile").textContent = k.stateFile || ".kvm-device.json";
+  const kind = !k.tokenSet ? "token" : st.ok === false && ["api_off", "token"].includes(st.kind) ? st.kind : "";
+  if (kind !== kvmHelpKind) { kvmHelpKind = kind; if (kind) $("kvmHelp").open = true; }
+}
+function kvmLink() { const h = $("kvmUrl").value.trim(); $("kvmUiLink").href = h ? (h.includes("://") ? h : "http://" + h) : "#"; }
+$("kvmUrl").oninput = () => { $("kvmUrl").dataset.dirty = "1"; kvmLink(); };
+$("kvmForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  $("kvmConnect").disabled = true; $("kvmMeta").textContent = "checking …";
+  try {
+    renderKvm(await api("/dashboard/api/kvm", { url: $("kvmUrl").value, token: $("kvmToken").value }));
+    $("kvmToken").value = ""; delete $("kvmUrl").dataset.dirty;
+    refreshLive(true);
+  } catch (e) { $("kvmMeta").innerHTML = `<span style="color:var(--bad)">${escapeHtml(e.message)}</span>`; }
+  $("kvmConnect").disabled = false;
+};
+// Over plain http on the LAN the async clipboard API is missing, so it falls back to a selected textarea.
+$("kvmCopy").onclick = async () => {
+  const text = $("kvmSnippet").textContent;
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select();
+    document.execCommand("copy"); t.remove();
+  }
+  $("kvmCopy").textContent = "Copied ✓"; setTimeout(() => { $("kvmCopy").textContent = "Copy the line"; }, 1500);
+};
+api("/dashboard/api/kvm").then(k => { $("kvmSnippet").textContent = k.snippet; renderKvm(k); }).catch(() => {});
 $("cancel").onclick = () => post("/dashboard/api/cancel");
 // LAN LED: green when the dashboard is served on the local network; the popover shows its QR code and link.
 async function loadLan() {
@@ -679,6 +755,7 @@ async function tick() {
     renderInnerVoice(s.innerVoice);
     renderPointer(s.pointer, s.sphero);
     renderSphero(s.sphero);
+    renderKvm(s.kvm);
     queueInnerVoice(s.events || []);
     if (res) $("result").textContent = `${res.status}: ${res.message}\n` + (res.steps || []).map(x => `${x.step}. ${x.action} → ${x.outcome}`).join("\n");
     $("run").disabled = s.running;

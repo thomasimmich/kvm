@@ -43,23 +43,30 @@ endpoints:
 ./dev_deploy.sh -r <device-ip>
 ```
 
-**2. Enable the API on the device and get a token.** Open the JetKVM web UI, open the browser
-console, and run:
+**2. Enable the API on the device and get a token.** Easiest from the dashboard (after step 3):
+its **JetKVM** section asks for the IP address (shown on the JetKVM's display) and the token, and
+its "Where do I get these?" help has a one-line snippet to copy. Or by hand: open the JetKVM web
+UI, open the browser console, and run:
 
 ```js
-window.__kvmTestHooks.sendJsonRpc("setCuaApiConfig", { enabled: true, regenerateToken: true }, (r) => console.log(r))
+window.__kvmTestHooks.sendJsonRpc("setCuaApiConfig", { enabled: true, regenerateToken: false }, (r) => console.log(r))
 // → { result: { enabled: true, token: "…" } }
 ```
 
+`regenerateToken: false` keeps an existing token; `true` makes a new one and revokes the old.
 You can call `getCuaApiConfig` later to read the token again. Setting `enabled: false` turns the API
-off.
+off. The setting survives reboots and firmware deploys.
+
+The address and token entered in the dashboard are kept in `CUA_KVM_STATE_FILE` (default
+`.kvm-device.json`, git-ignored) and take precedence over `KVM_URL` / `KVM_TOKEN` in `.env`.
+`npm run deploy` uses that address too.
 
 **3. Install and configure this service.**
 
 ```bash
 cd cua
 uv sync --extra omniparser          # PyTorch, ultralytics, transformers, OCR
-cp .env.example .env                # set KVM_URL, KVM_TOKEN, KVM_KEYBOARD_LAYOUT, TYPESAFE_API_KEY
+cp .env.example .env                # set KVM_KEYBOARD_LAYOUT, TYPESAFE_API_KEY (KVM_URL, KVM_TOKEN or in the dashboard)
 ```
 
 The OmniParser weights (about 1 GB) download into `weights/` on first use. Without
@@ -192,6 +199,7 @@ See [docs/agent-server-integration.md](docs/agent-server-integration.md) for con
 
 | Path | What it does |
 |---|---|
+| `kvm/connection.py` | The JetKVM's address and token: `.env` defaults, overridden from the dashboard |
 | `kvm/device.py` | `KvmDevice` interface; `HttpKvm` for the real device; `FakeKvm` for replays and tests |
 | `kvm/decode.py` | Decodes the device's GOP with PyAV, keeping the last picture |
 | `kvm/actuation.py` | Human-like mouse paths, clicks, scrolling and typing |

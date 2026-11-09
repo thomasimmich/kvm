@@ -28,6 +28,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent.inbox import Command, parse_command
 from .config import lan_ip
+from .kvm.connection import TOKEN_SNIPPET
 from .kvm.sphero import SpheroError
 from .narration.leanscope_auth import ChoreoSelection, LeanScopeError
 from .narration.session import qr_svg
@@ -154,6 +155,7 @@ def build_server(service: CuaService) -> MCPServer:
             "innerVoice": service.inner_voice.state(),
             "pointer": service.pointer_state(),
             "sphero": service.sphero.snapshot(),
+            "kvm": service.kvm_state(),
         })  # fmt: skip
 
     @mcp.custom_route("/dashboard/api/network", methods=["GET"])
@@ -221,8 +223,24 @@ def build_server(service: CuaService) -> MCPServer:
         try:
             data = await blocking(grab)
         except Exception as e:  # noqa: BLE001 — shown in the dashboard
-            return PlainTextResponse(str(e), status_code=503)
+            return PlainTextResponse(service.note_kvm(e)["error"], status_code=503)
+        service.note_kvm(None)
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @mcp.custom_route("/dashboard/api/kvm", methods=["GET", "POST"])
+    async def dashboard_kvm(request: Request) -> Response:
+        """GET: address, whether a token is set, last check. POST {url, token}: save both and check
+        them (an empty token keeps the saved one)."""
+        if request.method == "GET":
+            return JSONResponse({"ok": True, "result": {**service.kvm_state(), "snippet": TOKEN_SNIPPET}})
+        b = await request.json()
+        try:
+            res = await blocking(service.connect_kvm, str(b.get("url") or ""), str(b.get("token") or ""))
+        except Busy as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "result": res})
 
     # --- manual pointer in the live view, and the physical Sphero mouse --------------
 
