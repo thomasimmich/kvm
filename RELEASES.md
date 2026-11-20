@@ -1,5 +1,31 @@
 # Release notes
 
+## CUA 0.6.0: a tool service for the LeanScope `cua` channels (2026-11-20)
+
+**`cua/` service**
+- **The screen comes back as content:** every single-step tool (`cua_observe`,
+  `cua_click_element`, `cua_click_text`, `cua_scroll`, `cua_type_text`, `cua_press_keys`) now
+  returns three things. Names and arguments are unchanged.
+  - The text of before, as the first block.
+  - The screenshot as a JPEG image block, at most 1280 px wide.
+  - The parsed elements as structured content, with the screen and image sizes.
+  - The LeanScope MCP server's `cua` channels pass all three on; the agent server files them on
+    the recorded step.
+- **`cua_reset`:** brings the computer to its start state and returns the screen.
+  - The start state is the computer's own: `CUA_RESET_KEYS`, key combinations pressed in order
+    (for example `esc,esc,win+m`), then the pointer is parked in the middle of the screen.
+  - New settings: `CUA_RESET_KEYS` and `CUA_RESET_PAUSE_S`.
+- **Progress while looking:** the tools send MCP progress notifications per phase ("capturing
+  the screen", "parsing the screen").
+- **Reasons reach the caller:** an unknown element id, a missing start state or a run in progress
+  come back as a tool error with the reason, instead of "Error executing tool".
+- **Safe behind a tunnel:** a request that a tunnel or proxy on the same machine passed on
+  (Cloudflare Tunnel, for example) always needs the token, also for the dashboard. Before, it
+  counted as a local client.
+  - With `CUA_MCP_HOST=127.0.0.1`, the host of `CUA_PUBLIC_URL` is accepted as `Host` header.
+- **Docs:** `cua/docs/agent-server-integration.md`, section 7: the tool results, the reset, the
+  auth decision (one static token per service stays) and the Cloudflare Tunnel setup.
+
 ## CUA 0.5.0: drive the pointer in the live view, mirrored to a physical Sphero mouse (2026-11-08)
 
 **`cua/` service**

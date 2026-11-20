@@ -19,7 +19,6 @@ worker thread: a slow or failing agent server never blocks or fails a run.
 
 from __future__ import annotations
 
-import io
 import logging
 import queue
 import threading
@@ -27,7 +26,7 @@ from typing import Any
 
 from PIL import Image
 
-from ..perception.annotate import annotate
+from ..perception.annotate import annotate, jpeg
 from ..perception.types import Screen
 from .agent_server import AgentServerClient
 
@@ -35,15 +34,6 @@ log = logging.getLogger(__name__)
 
 MAX_ELEMENTS_CHARS = 4000
 BUSY_QUEUE = 100  # drop micro activity lines when this far behind
-
-
-def jpeg(image: Image.Image, max_width: int = 1280, quality: int = 80) -> bytes:
-    img = image.convert("RGB")
-    if img.width > max_width:
-        img = img.resize((max_width, round(img.height * max_width / img.width)), Image.Resampling.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
-    return buf.getvalue()
 
 
 class NarrationPublisher:

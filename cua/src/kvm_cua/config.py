@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     cua_max_steps: int = 15
     cua_runs_dir: Path = Path("runs")
 
+    # Start state for cua_reset: key combos pressed in order, comma-separated (e.g. "esc,esc,win+m").
+    # They must not toggle (win+d would show the windows again on the second reset). Empty: no reset.
+    cua_reset_keys: str = ""
+    cua_reset_pause_s: float = 0.6  # after each combo, so the machine can follow
+
     # MCP server
     # "lan": listen on all interfaces and show this machine's LAN address (192.168.…);
     # 127.0.0.1 keeps it local. Off loopback a token is required: without CUA_MCP_TOKEN one is

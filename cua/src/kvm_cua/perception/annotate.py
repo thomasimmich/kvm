@@ -1,6 +1,8 @@
-"""Draw element boxes and ids onto a screenshot (dashboard and traces)."""
+"""Draw element boxes and ids onto a screenshot (dashboard and traces), and encode screenshots."""
 
 from __future__ import annotations
+
+import io
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -36,3 +38,13 @@ def annotate(
         draw.rectangle((tx, ty, tx + tw + 4, ty + 15), fill=color + (220,))
         draw.text((tx + 2, ty + 1), tag, fill=(255, 255, 255), font=font)
     return img
+
+
+def jpeg(image: Image.Image, max_width: int = 1280, quality: int = 80) -> bytes:
+    """The screenshot as a JPEG, scaled down to max_width (what narration and the MCP tools send)."""
+    img = image.convert("RGB")
+    if img.width > max_width:
+        img = img.resize((max_width, round(img.height * max_width / img.width)), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()

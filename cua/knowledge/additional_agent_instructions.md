@@ -26,6 +26,9 @@ reach the real machine.
   - `cua_type_text` and `cua_press_keys` to type and press keys.
 - Element ids are only valid for the most recent observation. Call
   `cua_observe` again after anything changes.
+- `cua_reset` brings the computer back to its start state. It is for the
+  operator before a task starts. Don't call it in the middle of a task: the
+  work on the screen would be put away.
 
 ## Safety
 - Never confirm destructive dialogs (delete, overwrite, purchase, send) unless

@@ -118,7 +118,16 @@ regression fixtures.
 ## MCP surface
 
 The server speaks Streamable HTTP at `/mcp` and takes a bearer token from `CUA_MCP_TOKEN`.
-**Every tool returns plain text**, because the agent server flattens tool results to text.
+
+Every tool except `cua_run_goal` returns the screen in three forms:
+- **text** (the first block): the element list. A client that flattens results to text reads this.
+- **image**: the screenshot as a JPEG, at most 1280 px wide.
+- **structured content**: `{screen: {seq, width, height, imageWidth, imageHeight}, elements: [{id,
+  kind, label, bbox, interactable, score, source}]}`. `bbox` is in screen pixels (`width` ×
+  `height`); the image may be smaller.
+
+While a tool looks at the screen, it sends MCP progress notifications ("capturing the screen",
+"parsing the screen") to a caller that asked for them.
 
 | Tool | Purpose |
 |---|---|
@@ -129,12 +138,20 @@ The server speaks Streamable HTTP at `/mcp` and takes a bearer token from `CUA_M
 | `cua_scroll(direction, notches?)` | Scrolls up, down, left or right. |
 | `cua_type_text(text)` | Types text. |
 | `cua_press_keys("ctrl+l")` | Presses a key or key combination. |
+| `cua_reset()` | Brings the computer to its start state and returns the screen. For the operator, before a task starts. |
+
+**The start state** belongs to the computer, so it is configured here and is not an argument:
+`CUA_RESET_KEYS` holds key combinations that are pressed in order, for example `esc,esc,win+m` on
+Windows (close a menu, minimise every window). The pointer is then parked in the middle of the
+screen. Pick keys that do not toggle (`win+d` would show the windows again), so that a second
+reset leaves the same screen. Without `CUA_RESET_KEYS`, `cua_reset` answers with an error.
 
 The server also offers the prompt **`additional_agent_instructions`**, which carries the CUA
 background knowledge from `knowledge/additional_agent_instructions.md`. The agent server adds it to
 the step prompt automatically.
 
-See [docs/agent-server-integration.md](docs/agent-server-integration.md) for connecting a choreo.
+See [docs/agent-server-integration.md](docs/agent-server-integration.md) for connecting a choreo,
+and for reaching the service from the hosted LeanScope MCP server (`cua` channels) through a tunnel.
 
 ## Following and steering a run
 

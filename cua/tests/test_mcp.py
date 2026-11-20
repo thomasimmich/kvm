@@ -222,3 +222,145 @@ def test_free_port_skips_a_busy_one():
         port = busy.getsockname()[1]
         assert free_port("127.0.0.1", port) != port
         assert free_port("127.0.0.1", port, avoid={port + 1}) not in (port, port + 1)
+
+
+# --- the tool service for the LeanScope `cua` channels ---------------------------------------
+
+
+def parts(result):
+    """(text, image block, structured content) of a screen result."""
+    text, image = result.content
+    assert (text.type, image.type, image.mime_type) == ("text", "image", "image/jpeg")
+    return text.text, image, result.structured_content
+
+
+def decoded(image):
+    import base64
+    import io
+
+    from PIL import Image
+
+    return Image.open(io.BytesIO(base64.b64decode(image.data)))
+
+
+async def test_screen_tools_return_text_image_and_elements(tmp_path):
+    from kvm_cua.service import screen_text
+
+    svc = service(tmp_path)
+    mcp = build_server(svc)
+    text, image, data = parts(await mcp.call_tool("cua_observe", {}))
+    assert text == screen_text(svc.agent.last_screen)  # the text of before, unchanged
+    assert decoded(image).size == (800, 600)
+    assert data["screen"] == {**data["screen"], "width": 800, "height": 600, "imageWidth": 800, "imageHeight": 600}
+    assert [e["label"] for e in data["elements"]] == ["Files", "Settings"]
+    assert set(data["elements"][0]) == {"id", "kind", "label", "bbox", "interactable", "score", "source"}
+
+    text, _, data = parts(await mcp.call_tool("cua_observe", {"max_chars": 40}))
+    assert "omitted" in text and len(data["elements"]) == 2  # max_chars limits the text only
+
+    text, _, data = parts(await mcp.call_tool("cua_click_text", {"text": "settings"}))
+    assert text.startswith("clicked text 'Settings'\n") and data["elements"][0]["label"] == "General"
+    calls = [
+        ("cua_click_element", {"element_id": 0}),
+        ("cua_scroll", {"direction": "down"}),
+        ("cua_type_text", {"text": "abc"}),
+        ("cua_press_keys", {"combo": "enter"}),
+    ]
+    for name, args in calls:
+        text, image, data = parts(await mcp.call_tool(name, args))
+        assert "'General'" in text and decoded(image).format == "JPEG" and data["elements"]
+
+
+def test_screen_image_is_scaled_down_to_1280(tmp_path):
+    from PIL import Image
+
+    from kvm_cua.mcp_server import screen_result
+    from kvm_cua.perception.types import Screen
+
+    res = screen_result(Screen(image=Image.new("RGB", (2560, 1440)), elements=elements(HOME), seq=7), "t")
+    assert decoded(res.content[1]).size == (1280, 720)
+    assert res.structured_content["screen"] == {
+        "seq": 7, "width": 2560, "height": 1440, "imageWidth": 1280, "imageHeight": 720,
+    }  # fmt: skip
+
+
+async def test_reset_presses_the_configured_keys_and_is_repeatable(tmp_path):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from kvm_cua.kvm.keymap import combo
+
+    svc = service(tmp_path)
+    mcp = build_server(svc)
+    assert "cua_reset" in {t.name for t in await mcp.list_tools()}
+    with pytest.raises(ToolError, match="CUA_RESET_KEYS"):  # no start state configured
+        await mcp.call_tool("cua_reset", {})
+    svc.settings.cua_reset_keys = "esc, nonsense"
+    with pytest.raises(ToolError, match="nonsense"):
+        await mcp.call_tool("cua_reset", {})
+    assert not [e for kind, e in svc.device.events if kind == "keys"]  # nothing pressed
+
+    svc.settings.cua_reset_keys, svc.settings.cua_reset_pause_s = "esc, win+m", 0.0
+    text, _, first = parts(await mcp.call_tool("cua_reset", {}))
+    assert text.startswith("the computer is in its start state\n")
+    downs = [e for kind, e in svc.device.events if kind == "keys" and e.keys]
+    assert [(e.modifier, e.keys) for e in downs] == [(c.modifier, c.keys) for c in map(combo, ["esc", "win+m"])]
+    assert svc.pointer_state() == pytest.approx({"x": 50, "y": 50}, abs=0.2)
+
+    _, _, second = parts(await mcp.call_tool("cua_reset", {}))
+    assert second["elements"] == first["elements"]
+
+    svc.live.running = True
+    with pytest.raises(ToolError, match="running"):
+        await mcp.call_tool("cua_reset", {})
+
+
+async def test_perceiving_reports_progress(tmp_path):
+    from mcp.client import Client
+
+    seen = []
+
+    async def on_progress(progress, total, message):
+        seen.append(message)
+
+    async with Client(build_server(service(tmp_path))) as client:
+        res = await client.call_tool("cua_observe", {}, progress_callback=on_progress)
+        assert len(res.content) == 2 and res.structured_content["elements"]
+        assert seen == ["capturing the screen", "parsing the screen"]
+        seen.clear()
+        await client.call_tool("cua_press_keys", {"combo": "enter"}, progress_callback=on_progress)
+        assert seen == ["acting", "capturing the screen", "parsing the screen"]
+        res = await client.call_tool("cua_click_element", {"element_id": 99})  # the reason reaches the caller
+        assert res.is_error and "call cua_observe first" in res.content[0].text
+
+
+def test_a_tunnelled_request_is_not_a_local_one(tmp_path):
+    from kvm_cua.mcp_server import build_app
+
+    def lan_service():
+        svc = service(tmp_path)
+        svc.settings.cua_mcp_host = "lan"
+        svc.settings.cua_mcp_token_file = tmp_path / "token"
+        return svc
+
+    tunnel = {"CF-Connecting-IP": "203.0.113.7"}  # cloudflared on this machine, for someone outside
+    svc = lan_service()
+    with TestClient(build_app(svc), client=("127.0.0.1", 1234)) as c:
+        token = svc.settings.cua_mcp_token
+        assert c.get("/dashboard/api/state").status_code == 200  # the local browser
+        assert c.get("/dashboard/api/state", headers=tunnel).status_code == 401
+        assert c.post("/mcp", json={}, headers=tunnel).status_code == 401
+        assert c.post("/worker/dispatch", json={}, headers=tunnel).status_code == 401
+        assert c.post("/mcp", json={}, headers={**tunnel, "Authorization": f"Bearer {token}"}).status_code != 401
+
+
+def test_public_host_is_allowed_on_loopback(tmp_path):
+    from kvm_cua.mcp_server import _transport_security
+
+    s = service(tmp_path).settings
+    s.cua_mcp_host = "127.0.0.1"
+    assert _transport_security(s) is None
+    s.cua_public_url = "https://cua.example.com"
+    sec = _transport_security(s)
+    assert "cua.example.com" in sec.allowed_hosts and "https://cua.example.com" in sec.allowed_origins
+    s.cua_mcp_host = "lan"
+    assert _transport_security(s) is None

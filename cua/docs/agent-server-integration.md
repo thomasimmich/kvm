@@ -10,8 +10,10 @@ those, so the basic connection needs **no agent-server code**, only data in Lean
 |---|---|---|
 | Both on the Mac | `http://127.0.0.1:8765/mcp` | Plain HTTP needs `LEANSCOPE_MCP_ALLOW_INSECURE=1` on the agent server. |
 | CUA in the cloud | `https://cua.<domain>/mcp` | Put it behind TLS. The CUA reaches the KVM over Tailscale, which the firmware already supports. Set `KVM_URL=http://<kvm-tailnet-ip>`. |
+| CUA next to the dongle, caller hosted | `https://cua.<domain>/mcp` | A Cloudflare Tunnel from the CUA's machine. See section 7. |
 
-Always set `CUA_MCP_TOKEN`. The service refuses to listen on a non-loopback address without it.
+Set `CUA_MCP_TOKEN` whenever the service is reachable from outside the machine. Without it,
+serving on the network makes a token once and keeps it in `.cua-mcp-token`.
 
 ## 2. Author the resource in LeanScope
 
@@ -24,7 +26,7 @@ Create the following:
    relationship may override `url` again, for example so that one choreo uses a different KVM.
 
 The engine then does three things for every step that sees the resource:
-- It lists the 7 `cua_*` tools. MCP tools are always added, whatever tier the other tools come from.
+- It lists the 8 `cua_*` tools. MCP tools are always added, whatever tier the other tools come from.
 - It appends the prompt `additional_agent_instructions` to the step prompt. This is the CUA
   background knowledge; edit `cua/knowledge/additional_agent_instructions.md` to change it.
 - The step's LLM calls `cua_run_goal`, with the step's text as the goal and with hints and inputs
@@ -49,8 +51,8 @@ experiments, you can also run the CUA on loopback without `CUA_MCP_TOKEN`.
 |---|---|
 | 120 s per MCP tool call (`DEFAULT_CALL_TIMEOUT_MS`) | `cua_run_goal` stops starting new steps after `time_budget_s` (default 100 s) and returns `status: time_budget`. The LLM can call it again to continue. |
 | 10 model calls per turn | One `cua_run_goal` call runs the whole inner loop, so the LLM usually needs just one or two calls. |
-| Tool results flattened to text; images become `[image/png]` | Every tool returns text: the element list and the step summary. |
-| At most 32 tools per server | The CUA exposes 7. |
+| Tool results flattened to text; images become `[image/jpeg]` | The text is always the first block: the element list and the step summary. The screenshot and the structured elements are for callers that keep them (section 7). |
+| At most 32 tools per server | The CUA exposes 8. |
 
 ## 5. Live narration and remote control
 
@@ -196,3 +198,101 @@ relationships (breadth-first, up to 3 edges). The nearest `voiceId` (parameter
 `94896ee6-bf6c-46a1-b404-e872365ef034`, or the legacy `voice` parameter) is the ElevenLabs voice.
 The persona's own `voiceId` field only counts when it looks like an ElevenLabs id, since it
 usually names an OpenAI voice.
+
+## 7. Through the LeanScope MCP server (`cua` channels)
+
+A second way to use the CUA, where the agent server decides and records, and the CUA only
+perceives and acts:
+
+```
+JetKVM device <- CUA service (MCP) <- cua channels (leanscope-mcp-server) <- agent server
+              <- LeanScope repository <- timeline app
+```
+
+- The model of the actor leading a step calls the CUA's single-step tools through the MCP
+  server's `cua` channel. `cua_run_goal` and Jev are not used on this path.
+- The agent server stores each action as a scenario step and files the screenshot and the
+  element list the tool returned. The CUA knows nothing about LeanScope on this path: no session
+  token, no upload, no narration.
+- A supervisor actor resets the computer as the first tool call of a choreo, through the
+  `cua-operator` channel.
+
+### Tools and results
+
+| Channel tool | Calls here | Arguments |
+|---|---|---|
+| `computer_get_screen` | `cua_observe` | `max_chars?` |
+| `computer_click_element` | `cua_click_element` | `element_id`, `button?`, `double?` |
+| `computer_click_text` | `cua_click_text` | `text`, `double?` |
+| `computer_type_text` | `cua_type_text` | `text` |
+| `computer_press_keys` | `cua_press_keys` | `combo` |
+| `computer_scroll` | `cua_scroll` | `direction`, `notches?` |
+| `computer_reset` | `cua_reset` | none |
+
+Each of these returns:
+1. a text block: the element list, as before (`[id] kind 'label' at position (x,y) WxH`);
+2. an image block: the screenshot, JPEG, at most 1280 px wide, quality 80;
+3. structured content:
+   `{"screen": {"seq", "width", "height", "imageWidth", "imageHeight"}, "elements": [{"id", "kind",
+   "label", "bbox", "interactable", "score", "source"}]}`. The elements have the shape of a
+   trace's `screen_NNN.elements.json`. `bbox` is `[x0, y0, x1, y1]` in screen pixels (`width` ×
+   `height`); multiply by `imageWidth / width` to draw it on the image. `max_chars` shortens the
+   text only.
+
+A mistake the caller can fix comes back as a tool error with its reason: an element id that is
+not on the last observed screen, no start state configured, a run in progress.
+
+While a tool looks at the screen (seconds), it sends MCP progress notifications with a message
+per phase: "acting", "capturing the screen", "waiting for the screen to settle", "parsing the
+screen". The MCP server's HTTP transport does not pass them on yet.
+
+### Reset
+
+`cua_reset` takes no arguments, because the caller does not know the machine. The start state is
+this computer's own: `CUA_RESET_KEYS`, key combinations pressed in order (`CUA_RESET_PAUSE_S`
+apart), after which the pointer is parked in the middle of the screen and the screen is returned.
+Example for Windows: `esc,esc,win+m`. Nothing is closed, so no "save changes?" dialog can come up.
+The keys must not toggle (`win+d` does), so that calling it twice leaves the same screen. It is
+refused while `cua_run_goal` is running.
+
+### Device auth (decided 2026-11-20)
+
+One static bearer per service stays: `CUA_MCP_TOKEN` here is `CUA_SERVICE_TOKEN` on the MCP
+server. One service drives one dongle, so on this side that is already one token per computer.
+When several computers are attached to one MCP server and must not share a token, the MCP server
+would hold a token per Computer resource; this service needs no change for that.
+
+### Reaching the service: Cloudflare Tunnel
+
+The CUA runs on a machine in the dongle's network; the hosted MCP server reaches it through a
+Cloudflare Tunnel that ends on that machine.
+
+1. In `.env`: set `CUA_MCP_TOKEN` to a long random value, and `CUA_PUBLIC_URL=https://cua.<domain>`.
+2. Run `cloudflared` on the CUA's machine with an ingress that passes on **only `/mcp`**:
+
+   ```yaml
+   # ~/.cloudflared/config.yml
+   tunnel: <tunnel-id>
+   credentials-file: /Users/<you>/.cloudflared/<tunnel-id>.json
+   ingress:
+     - hostname: cua.<domain>
+       path: ^/mcp
+       service: http://127.0.0.1:8765
+     - service: http_status:404
+   ```
+
+3. In LeanScope, put `https://cua.<domain>/mcp` into the Computer resource.
+4. On the MCP server: add `cua.<domain>` to `CUA_ALLOWED_HOSTS` and set `CUA_SERVICE_TOKEN` to the
+   CUA's `CUA_MCP_TOKEN`.
+
+Why the token and the path rule matter: `cloudflared` connects from loopback, and local clients
+need no token for the dashboard. The service therefore treats every request with a forwarding
+header (`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `Forwarded`) as a remote client that
+needs the token, on every route. The path rule keeps the dashboard and `/worker/dispatch` off the
+internet altogether.
+
+With `CUA_MCP_HOST=127.0.0.1` the MCP endpoint only answers to local `Host` headers; the host of
+`CUA_PUBLIC_URL` is then allowed as well. With `CUA_MCP_HOST=lan` any host is accepted.
+
+A tool call must finish within Cloudflare's 100 s limit for a proxied request; the single-step
+tools take seconds.

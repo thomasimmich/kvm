@@ -123,12 +123,23 @@ class Agent:
 
     # --- perception --------------------------------------------------------------
 
-    def observe(self, prev: Screen | None = None, after_seq: int = 0, settle: bool = True) -> Screen:
-        """Screenshot once the screen stopped changing (animations, page loads), then parse it."""
+    def observe(
+        self,
+        prev: Screen | None = None,
+        after_seq: int = 0,
+        settle: bool = True,
+        on_phase: Callable[[str], None] | None = None,
+    ) -> Screen:
+        """Screenshot once the screen stopped changing (animations, page loads), then parse it.
+        on_phase hears what is going on ("capturing the screen", …), for a caller that waits."""
+        phase = on_phase or (lambda _text: None)
         t_shot = time.time()
+        phase("capturing the screen")
         frame = self.device.screenshot(after_seq=after_seq)
         stable = False
         if settle:
+            if self.settle_timeout_s > 0:
+                phase("waiting for the screen to settle")
             deadline = time.time() + self.settle_timeout_s
             while time.time() < deadline:
                 time.sleep(self.settle_interval_s)
@@ -145,6 +156,7 @@ class Agent:
         self._emit({"type": "screen_raw", "seq": frame.seq, "_image": frame.image})
         self._maybe_describe(frame.image, frame.seq, phash)
         self._say("Parsing the screen (OmniParser)")
+        phase("parsing the screen")
         t0 = time.time()
         elements = self.parser.parse(frame.image)
         screen = Screen(

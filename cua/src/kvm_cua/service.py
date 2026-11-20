@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -22,6 +23,7 @@ from .decision.jev import JevClient
 from .kvm.actuation import Actuator
 from .kvm.connection import KvmConnection, explain_kvm_error, normalize_kvm_url
 from .kvm.device import HttpKvm, KvmDevice, WheelEvent
+from .kvm.keymap import combo
 from .kvm.sphero import SpheroMirror
 from .narration.agent_server import AgentServerClient
 from .narration.inner_voice import InnerVoice, Speaker, Thinker
@@ -35,6 +37,9 @@ from .perception.parser import UIParser, make_parser
 from .perception.types import Screen
 
 log = logging.getLogger(__name__)
+
+# Hears what an operation is doing ("capturing the screen", "parsing the screen"), for a caller that waits.
+OnPhase = Callable[[str], None] | None
 
 
 @dataclass
@@ -268,17 +273,49 @@ class CuaService:
         self._agent.command(cmd)
         return True
 
-    def observe(self) -> Screen:
+    def observe(self, on_phase: OnPhase = None) -> Screen:
         with self.agent.lock:
-            return self.agent.observe()
+            return self.agent.observe(on_phase=on_phase)
 
-    def _act_then_observe(self, fn) -> Screen:
+    def _act_then_observe(self, fn, on_phase: OnPhase = None) -> Screen:
         with self.agent.lock:
-            prev = self.agent.last_screen or self.agent.observe(settle=False)
+            prev = self.agent.last_screen or self.agent.observe(settle=False, on_phase=on_phase)
+            if on_phase is not None:
+                on_phase("acting")
             fn(prev)
-            return self.agent.observe(prev=prev, after_seq=prev.seq)
+            return self.agent.observe(prev=prev, after_seq=prev.seq, on_phase=on_phase)
 
-    def click_element(self, element_id: int, button: str = "left", double: bool = False) -> Screen:
+    def reset(self, on_phase: OnPhase = None) -> Screen:
+        """Brings the computer to its start state: presses the device's CUA_RESET_KEYS in order,
+        parks the pointer in the middle of the screen and returns the screen. The keys are this
+        device's own; a caller does not know the machine."""
+        keys = [k.strip() for k in self.settings.cua_reset_keys.split(",") if k.strip()]
+        if not keys:
+            raise ValueError("no start state is configured for this computer: set CUA_RESET_KEYS")
+        for k in keys:  # all checked before the first one is pressed
+            try:
+                combo(k)
+            except (KeyError, ValueError) as e:
+                raise ValueError(f"CUA_RESET_KEYS: '{k}' is not a key combination ({e})") from None
+        if self.live.running:
+            raise Busy("the agent is running: cancel it first")
+        agent = self.agent
+        with agent.lock:
+            if on_phase is not None:
+                on_phase("returning to the start state")
+            self._on_event(
+                {"type": "activity", "text": f"Reset to the start state: {', '.join(keys)}", "ts": time.time()}
+            )
+            for k in keys:
+                agent.actuator.press(k)
+                agent.actuator.pause(self.settings.cua_reset_pause_s)
+            w, h = self.device.screen_size()
+            agent.actuator.move_to(w / 2, h / 2)  # the same hover state after every reset
+            return agent.observe(on_phase=on_phase)
+
+    def click_element(
+        self, element_id: int, button: str = "left", double: bool = False, on_phase: OnPhase = None
+    ) -> Screen:
         def act(prev: Screen) -> None:
             el = prev.element(element_id)
             if el is None:
@@ -290,30 +327,32 @@ class CuaService:
             )
             self.agent.actuator.click(*el.center, button=button, count=2 if double else 1)
 
-        return self._act_then_observe(act)
+        return self._act_then_observe(act, on_phase)
 
-    def click_text(self, text: str, double: bool = False) -> tuple[Screen, str]:
+    def click_text(self, text: str, double: bool = False, on_phase: OnPhase = None) -> tuple[Screen, str]:
         with self.agent.lock:
-            screen = self.agent.observe()
+            screen = self.agent.observe(on_phase=on_phase)
             el = find_element(screen, text)
             if el is None:
                 return screen, f"no element containing '{text}' is visible"
-        scr = self.click_element(el.id, double=double)
+        scr = self.click_element(el.id, double=double, on_phase=on_phase)
         return scr, f"clicked {el.kind} '{el.label}'"
 
-    def scroll(self, direction: Literal["up", "down", "left", "right"], notches: int = 5) -> Screen:
+    def scroll(
+        self, direction: Literal["up", "down", "left", "right"], notches: int = 5, on_phase: OnPhase = None
+    ) -> Screen:
         def act(prev: Screen) -> None:
             w, h = prev.size
             a = self.agent.actuator
             a.scroll(direction, notches, at=a.position or (w / 2, h / 2))
 
-        return self._act_then_observe(act)
+        return self._act_then_observe(act, on_phase)
 
-    def type_text(self, text: str) -> Screen:
-        return self._act_then_observe(lambda prev: self.agent.actuator.type_text(text))
+    def type_text(self, text: str, on_phase: OnPhase = None) -> Screen:
+        return self._act_then_observe(lambda prev: self.agent.actuator.type_text(text), on_phase)
 
-    def press(self, combo: str) -> Screen:
-        return self._act_then_observe(lambda prev: self.agent.actuator.press(combo))
+    def press(self, keys: str, on_phase: OnPhase = None) -> Screen:
+        return self._act_then_observe(lambda prev: self.agent.actuator.press(keys), on_phase)
 
     def reset_live(self) -> None:
         """Empties what the dashboard shows of past runs (the activity log and the last result)."""

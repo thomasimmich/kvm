@@ -1,9 +1,12 @@
 """Streamable-HTTP MCP server — what the LeanScope agent server connects to.
 
-All tool results are plain text: the agent server flattens MCP results to a
-string and shows images only as "[image/png]". The CUA background knowledge is
-served as the prompt `additional_agent_instructions`, which the agent server
-appends to the step prompt automatically.
+Every tool that yields a screen returns three things: the text (first block; a
+client that flattens results to a string reads only this), the screenshot as a
+JPEG image block, and the parsed elements as structured content. The LeanScope
+MCP server's `cua` channels hand all three on, and the agent server files them
+on the recorded step. `cua_run_goal` returns text only. The CUA background
+knowledge is served as the prompt `additional_agent_instructions`, which the
+agent server appends to the step prompt automatically.
 
 The same process also serves a small live dashboard under /dashboard, and
 /worker/dispatch, which the agent server calls when the narration choreo's
@@ -12,6 +15,7 @@ The same process also serves a small live dashboard under /dashboard, and
 
 from __future__ import annotations
 
+import base64
 import hmac
 import io
 import ipaddress
@@ -19,19 +23,25 @@ import logging
 import threading
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import anyio
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp_types import CallToolResult, ImageContent, TextContent
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent.inbox import Command, parse_command
-from .config import lan_ip
+from .config import Settings, lan_ip
 from .kvm.connection import TOKEN_SNIPPET
 from .kvm.sphero import SpheroError
 from .narration.leanscope_auth import ChoreoSelection, LeanScopeError
 from .narration.session import qr_svg
+from .perception.annotate import jpeg
+from .perception.types import Screen
 from .service import Busy, CuaService, screen_text
 
 log = logging.getLogger(__name__)
@@ -47,18 +57,69 @@ def knowledge_text() -> str:
         return "Use cua_run_goal to operate the remote computer."
 
 
+SCREEN_IMAGE_WIDTH = 1280  # the width of the screenshot a tool returns (smaller screens stay as they are)
+
+
+def screen_result(screen: Screen, text: str) -> CallToolResult:
+    """What a tool returns for a screen: the text, the screenshot, and the elements as data.
+
+    Element boxes are in screen pixels (`width` x `height`); the image may be scaled down
+    (`imageWidth` x `imageHeight`).
+    """
+    data = jpeg(screen.image, SCREEN_IMAGE_WIDTH)
+    w, h = screen.size
+    scale = min(1.0, SCREEN_IMAGE_WIDTH / w)
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=text),
+            ImageContent(type="image", data=base64.b64encode(data).decode("ascii"), mime_type="image/jpeg"),
+        ],
+        structured_content={
+            "screen": {
+                "seq": screen.seq,
+                "width": w,
+                "height": h,
+                "imageWidth": round(w * scale),
+                "imageHeight": round(h * scale),
+            },
+            "elements": [e.to_json() for e in screen.elements],
+        },
+    )
+
+
 def build_server(service: CuaService) -> MCPServer:
     mcp = MCPServer(
         name="leanscope-kvm-cua",
         title="KVM computer-using agent",
         instructions=(
             "Operates a real remote computer through a hardware KVM (screen parsing + mouse/keyboard). "
-            "Start with cua_run_goal; use the single-step tools for corrections."
+            "Start with cua_run_goal; use the single-step tools for corrections. "
+            "A caller that decides itself uses only the single-step tools."
         ),
     )
 
     async def blocking(fn, *args):
         return await anyio.to_thread.run_sync(lambda: fn(*args))
+
+    async def perceiving(ctx: Context, fn, *args):
+        """Runs a service operation that ends with a look at the screen, and reports each of its
+        phases to the caller as an MCP progress notification (a caller that did not ask gets none)."""
+        count = 0
+
+        def on_phase(text: str) -> None:
+            nonlocal count
+            count += 1
+            try:
+                anyio.from_thread.run(ctx.report_progress, count, None, text)
+            except Exception:  # progress is a courtesy and never fails the call
+                log.debug("progress notification failed", exc_info=True)
+
+        try:
+            return await anyio.to_thread.run_sync(lambda: fn(*args, on_phase=on_phase))
+        except (ValueError, Busy) as e:
+            # the caller's to fix (an unknown element id, no start state, a run in progress): the SDK
+            # hides the text of any other exception behind "Error executing tool …"
+            raise ToolError(str(e)) from e
 
     @mcp.tool(structured_output=False)
     async def cua_run_goal(
@@ -87,40 +148,60 @@ def build_server(service: CuaService) -> MCPServer:
         )
         return res.summary()
 
-    @mcp.tool(structured_output=False)
-    async def cua_observe(max_chars: int = 12000) -> str:
-        """Look at the remote screen now. Returns every UI element as `[id] kind 'label' at position (x,y) WxH`.
-        Ids are valid until the next observation."""
-        return screen_text(await blocking(service.observe), max_chars)
+    @mcp.tool()
+    async def cua_observe(ctx: Context, max_chars: int = 12000) -> CallToolResult:
+        """Look at the remote screen now. Returns every UI element as `[id] kind 'label' at position (x,y) WxH`,
+        the screenshot as an image, and the elements as structured content. Ids are valid until the next
+        observation. max_chars limits the text only."""
+        screen = await perceiving(ctx, service.observe)
+        return screen_result(screen, screen_text(screen, max_chars))
 
-    @mcp.tool(structured_output=False)
+    @mcp.tool()
     async def cua_click_element(
-        element_id: int, button: Literal["left", "right", "middle"] = "left", double: bool = False
-    ) -> str:
+        ctx: Context,
+        element_id: int,
+        button: Literal["left", "right", "middle"] = "left",
+        double: bool = False,
+    ) -> CallToolResult:
         """Click an element (by id from the latest cua_observe) with a human-like mouse movement.
         Returns the screen after the click."""
-        return screen_text(await blocking(service.click_element, element_id, button, double))
+        screen = await perceiving(ctx, service.click_element, element_id, button, double)
+        return screen_result(screen, screen_text(screen))
 
-    @mcp.tool(structured_output=False)
-    async def cua_click_text(text: str, double: bool = False) -> str:
+    @mcp.tool()
+    async def cua_click_text(ctx: Context, text: str, double: bool = False) -> CallToolResult:
         """Observe, then click the element whose label contains `text` (case-insensitive). Returns the new screen."""
-        screen, msg = await blocking(service.click_text, text, double)
-        return msg + "\n" + screen_text(screen)
+        screen, msg = await perceiving(ctx, service.click_text, text, double)
+        return screen_result(screen, msg + "\n" + screen_text(screen))
 
-    @mcp.tool(structured_output=False)
-    async def cua_scroll(direction: Literal["up", "down", "left", "right"], notches: int = 5) -> str:
+    @mcp.tool()
+    async def cua_scroll(
+        ctx: Context, direction: Literal["up", "down", "left", "right"], notches: int = 5
+    ) -> CallToolResult:
         """Scroll with the mouse wheel at the current pointer position (vertical or horizontal). Returns the new screen."""
-        return screen_text(await blocking(service.scroll, direction, notches))
+        screen = await perceiving(ctx, service.scroll, direction, notches)
+        return screen_result(screen, screen_text(screen))
 
-    @mcp.tool(structured_output=False)
-    async def cua_type_text(text: str) -> str:
-        """Type text into the focused field on the remote computer (keyboard layout from KVM_KEYBOARD_LAYOUT)."""
-        return screen_text(await blocking(service.type_text, text))
+    @mcp.tool()
+    async def cua_type_text(ctx: Context, text: str) -> CallToolResult:
+        """Type text into the focused field on the remote computer (keyboard layout from KVM_KEYBOARD_LAYOUT).
+        Returns the new screen."""
+        screen = await perceiving(ctx, service.type_text, text)
+        return screen_result(screen, screen_text(screen))
 
-    @mcp.tool(structured_output=False)
-    async def cua_press_keys(combo: str) -> str:
+    @mcp.tool()
+    async def cua_press_keys(ctx: Context, combo: str) -> CallToolResult:
         """Press a key or combination, e.g. 'enter', 'esc', 'tab', 'ctrl+l', 'alt+tab', 'cmd+space'. Returns the new screen."""
-        return screen_text(await blocking(service.press, combo))
+        screen = await perceiving(ctx, service.press, combo)
+        return screen_result(screen, screen_text(screen))
+
+    @mcp.tool()
+    async def cua_reset(ctx: Context) -> CallToolResult:
+        """Bring the remote computer to its start state (this computer's own procedure, e.g. show the
+        desktop) and return the screen. Safe to call twice. For the operator before a task starts, not a
+        step of a task."""
+        screen = await perceiving(ctx, service.reset)
+        return screen_result(screen, "the computer is in its start state\n" + screen_text(screen))
 
     @mcp.prompt(
         name="additional_agent_instructions",
@@ -376,7 +457,7 @@ def build_server(service: CuaService) -> MCPServer:
         if key:
             if not hmac.compare_digest(request.query_params.get("key", "").encode(), key.encode()):
                 return JSONResponse({"error": "wrong or missing ?key="}, status_code=401)
-        elif not _is_this_machine(request.client.host if request.client else ""):
+        elif not _is_local_request(request):
             return JSONResponse({"error": "set CUA_WORKER_KEY to accept remote dispatches"}, status_code=401)
         if service.narration is None:
             return JSONResponse({"error": "narration is off: set LEANSCOPE_AGENT_SERVER_URL"}, status_code=503)
@@ -462,7 +543,8 @@ class BearerAuth:
 
     /healthz is open. The dashboard is also open to loopback clients, so the local
     browser needs no token; remote clients pass the token as ?token=… once, which
-    sets a cookie.
+    sets a cookie. A request that a proxy or tunnel on this machine passed on is a
+    remote client, although it arrives from loopback.
     """
 
     def __init__(self, app: ASGIApp, token: str, open_to_loopback: bool = False):
@@ -477,11 +559,12 @@ class BearerAuth:
         path = req.url.path
         if path == "/healthz" or path.startswith("/worker/"):  # /worker/* checks CUA_WORKER_KEY itself
             return await self.app(scope, receive, send)
-        if self.open_to_loopback and _is_this_machine(req.client.host if req.client else ""):
+        local = _is_local_request(req)
+        if self.open_to_loopback and local:
             return await self.app(scope, receive, send)
         given = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
         if path.startswith("/dashboard"):
-            if _is_this_machine(req.client.host if req.client else ""):
+            if local:
                 return await self.app(scope, receive, send)
             given = given or req.query_params.get("token", "") or req.cookies.get("cua_token", "")
         if given and hmac.compare_digest(given.encode(), self.token):
@@ -528,6 +611,32 @@ def _is_this_machine(host: str) -> bool:
     return host in own
 
 
+FORWARDED_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "forwarded")
+
+
+def _is_local_request(request: Request) -> bool:
+    """A client on this machine that came directly. A tunnel or reverse proxy running here
+    (cloudflared, Tailscale Funnel) also connects from loopback, but for someone on the internet:
+    it names them in a forwarding header."""
+    if any(h in request.headers for h in FORWARDED_HEADERS):
+        return False
+    return _is_this_machine(request.client.host if request.client else "")
+
+
+def _transport_security(s: Settings) -> TransportSecuritySettings | None:
+    """On loopback the MCP endpoint only answers to local Host headers (the SDK's DNS rebinding
+    protection). A tunnel sends the public host name, so the one in CUA_PUBLIC_URL is allowed too."""
+    public = urlsplit(s.cua_public_url).netloc
+    if not public or not _is_loopback(s.bind_host):
+        return None  # the SDK's defaults
+    origin = f"{urlsplit(s.cua_public_url).scheme}://{public}"
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", public, f"{public}:*"],
+        allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*", origin],
+    )
+
+
 def _kept_token(path: Path) -> str:
     """The token made for serving on the network without CUA_MCP_TOKEN, made once and kept."""
     import secrets
@@ -546,7 +655,7 @@ def _kept_token(path: Path) -> str:
 def build_app(service: CuaService):
     s = service.settings
     mcp = build_server(service)
-    app = mcp.streamable_http_app(host=s.bind_host)
+    app = mcp.streamable_http_app(host=s.bind_host, transport_security=_transport_security(s))
     if s.cua_mcp_token or _is_loopback(s.bind_host):
         return BearerAuth(app, s.cua_mcp_token)
     # On the network without a configured token: loopback clients (the local agent server,
