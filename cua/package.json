@@ -3,7 +3,8 @@
   "private": true,
   "description": "Shortcuts for the KVM computer-using agent. Run from cua/.",
   "scripts": {
-    "deploy": "scripts/deploy.sh",
+    "deploy:fix": "scripts/deploy.sh",
+    "deploy:temp": "scripts/deploy.sh --temp",
     "cua": "scripts/start.sh"
   }
 }

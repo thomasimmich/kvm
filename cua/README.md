@@ -27,12 +27,16 @@ here: on a Mac today, and later in the cloud next to the agent server.
 From `cua/`, in two terminals:
 
 ```bash
-npm run deploy   # starts the x86 build VM if needed, deploys the firmware to KVM_URL from cua/.env
-npm run cua      # starts the CUA (MCP + dashboard) and opens the dashboard
+npm run deploy:fix   # starts the x86 build VM if needed, installs the firmware on the KVM at KVM_URL from cua/.env
+npm run cua          # starts the CUA (MCP + dashboard) and opens the dashboard
 ```
 
-The debug firmware runs only while `npm run deploy` runs. Use `npm run deploy -- -i` to
-install it permanently.
+`npm run deploy:fix` installs the firmware permanently: it survives reboots, and the device's
+auto-update is turned off so the next upstream JetKVM release does not replace it. The device
+reboots at the end. You only need to deploy again after changing the firmware.
+For a quick test, `npm run deploy:temp` runs a debug build only while the command runs. The
+installed firmware comes back when it ends or the device reboots.
+To keep auto-update on, use `npm run deploy:fix -- --keep-auto-update`.
 
 ## Setup
 
@@ -40,7 +44,8 @@ install it permanently.
 endpoints:
 
 ```bash
-./dev_deploy.sh -r <device-ip>
+./dev_deploy.sh -r <device-ip> -i   # install permanently and turn auto-update off (npm run deploy:fix does this)
+./dev_deploy.sh -r <device-ip>      # run a debug build only while the command runs
 ```
 
 **2. Enable the API on the device and get a token.** Easiest from the dashboard (after step 3):
@@ -59,7 +64,7 @@ off. The setting survives reboots and firmware deploys.
 
 The address and token entered in the dashboard are kept in `CUA_KVM_STATE_FILE` (default
 `.kvm-device.json`, git-ignored) and take precedence over `KVM_URL` / `KVM_TOKEN` in `.env`.
-`npm run deploy` uses that address too.
+`npm run deploy:fix` and `npm run deploy:temp` use that address too.
 
 **3. Install and configure this service.**
 

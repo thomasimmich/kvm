@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
 # Deploy this repo's firmware to the KVM from an Apple Silicon Mac.
 # Starts the x86 build VM (colima profile "x86build", Rosetta) if needed, then
-# runs dev_deploy.sh. The debug firmware runs only while this script runs.
-# Usage: npm run deploy [-- extra dev_deploy.sh options, e.g. -i to install]
+# runs dev_deploy.sh.
+#
+# By default the firmware is installed permanently (it survives reboots) and the
+# device's auto-update is turned off, so no upstream release replaces it.
+# With --temp, a debug build runs only while this script runs; the installed
+# firmware is untouched and comes back when the script ends or the device reboots.
+#
+# Usage: npm run deploy:fix | npm run deploy:temp  [-- extra dev_deploy.sh options]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+
+TEMP=false
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --temp) TEMP=true ;;
+    -i|--install) ;; # installing is the default
+    *) ARGS+=("$a") ;;
+  esac
+done
+if [ "$TEMP" = false ]; then
+  ARGS+=(-i)
+fi
 
 # The KVM address: KVM_IP if set, else the one saved in the dashboard (cua/.kvm-device.json),
 # else KVM_URL from cua/.env.
@@ -26,4 +45,7 @@ if ! colima status x86build >/dev/null 2>&1; then
 fi
 export DOCKER_CONTEXT=colima-x86build
 
-exec ./dev_deploy.sh -r "$KVM_IP" "$@"
+if [ "$TEMP" = false ]; then
+  echo "▶ Installing the firmware permanently; the device reboots when done (use --temp for a test run)"
+fi
+exec ./dev_deploy.sh -r "$KVM_IP" ${ARGS[@]+"${ARGS[@]}"}

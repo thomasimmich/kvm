@@ -39,5 +39,6 @@
   ],
   "[go]": {
     "editor.defaultFormatter": "golang.go"
-  }
+  },
+  "npm.autoDetect": "on"
 }

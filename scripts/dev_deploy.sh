@@ -27,6 +27,8 @@ show_help() {
     echo "      --enable-sync-trace    Enable sync trace (do not use in release builds)"
     echo "      --native-binary        Build and deploy the native binary (FOR DEBUGGING ONLY)"
     echo "  -i, --install              Build for release and install the app"
+    echo "                             (also turns the device's auto-update off)"
+    echo "      --keep-auto-update     With -i: leave the device's auto-update setting alone"
     echo "      --help                 Display this help message"
     echo
     echo "Container runtime:"
@@ -79,6 +81,7 @@ LOG_TRACE_SCOPES="${LOG_TRACE_SCOPES:-jetkvm,cloud,websocket,native,jsonrpc}"  #
 RUN_GO_TESTS=false
 RUN_GO_TESTS_ONLY=false
 INSTALL_APP=false
+KEEP_AUTO_UPDATE=false
 BUILD_IN_DOCKER=true
 DOCKER_BUILD_DEBUG=false
 DOCKER_BUILD_TAG=ghcr.io/jetkvm/buildkit:latest
@@ -142,6 +145,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -i|--install)
             INSTALL_APP=true
+            shift
+            ;;
+        --keep-auto-update)
+            KEEP_AUTO_UPDATE=true
             shift
             ;;
         --help)
@@ -288,6 +295,24 @@ then
 
 	# Copy the binary to the remote host as if we were the OTA updater.
 	sshdev "cat > /userdata/jetkvm/jetkvm_app.update" < bin/jetkvm_app
+
+	# Turn auto-update off, or the device replaces this build with the next
+	# upstream release. The app is stopped first so it cannot write its
+	# in-memory config back over the edit; it does not save on shutdown.
+	if [ "$KEEP_AUTO_UPDATE" = false ]; then
+		msg_info "▶ Disabling auto-update on the device"
+		sshdev ash << 'EOF'
+killall jetkvm_app jetkvm_app_debug 2>/dev/null || true
+CFG=/userdata/kvm_config.json
+if [ -f "$CFG" ] && grep -q '"auto_update_enabled"' "$CFG"; then
+  sed -i 's/"auto_update_enabled": *true/"auto_update_enabled": false/' "$CFG"
+  sync
+  echo "auto-update disabled"
+else
+  echo "WARNING: no auto_update_enabled in $CFG; turn auto-update off in the device settings"
+fi
+EOF
+	fi
 
 	# Reboot the device, the new app will be deployed by the startup process.
 	sshdev "reboot"
