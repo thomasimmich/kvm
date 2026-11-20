@@ -251,7 +251,7 @@ screen". The MCP server's HTTP transport does not pass them on yet.
 `cua_reset` takes no arguments, because the caller does not know the machine. The start state is
 this computer's own: `CUA_RESET_KEYS`, key combinations pressed in order (`CUA_RESET_PAUSE_S`
 apart), after which the pointer is parked in the middle of the screen and the screen is returned.
-Example for Windows: `esc,esc,win+m`. Nothing is closed, so no "save changes?" dialog can come up.
+Example for Windows: `esc,esc,win+m`. Example for macOS: `esc,esc,cmd+option+h,cmd+h`. Nothing is closed, so no "save changes?" dialog can come up.
 The keys must not toggle (`win+d` does), so that calling it twice leaves the same screen. It is
 refused while `cua_run_goal` is running.
 

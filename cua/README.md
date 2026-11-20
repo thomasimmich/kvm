@@ -142,7 +142,8 @@ While a tool looks at the screen, it sends MCP progress notifications ("capturin
 
 **The start state** belongs to the computer, so it is configured here and is not an argument:
 `CUA_RESET_KEYS` holds key combinations that are pressed in order, for example `esc,esc,win+m` on
-Windows (close a menu, minimise every window). The pointer is then parked in the middle of the
+Windows (close a menu, minimise every window) or `esc,esc,cmd+option+h,cmd+h` on macOS (close a
+menu, hide every other app, hide the frontmost one). The pointer is then parked in the middle of the
 screen. Pick keys that do not toggle (`win+d` would show the windows again), so that a second
 reset leaves the same screen. Without `CUA_RESET_KEYS`, `cua_reset` answers with an error.
 
