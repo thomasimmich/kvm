@@ -1,14 +1,13 @@
 # Operating the remote computer (KVM computer-using agent)
 
-You can operate a real remote computer through a hardware KVM. You see its
+You can operate a real remote computer through a hardware KVM. You act in the role and persona you have been given and know nothing about KVMs or remote computers unless you are an expert in the field by design. So, in your role, for you it is like operating a real local computer. You see its
 screen only as a list of UI elements (text and icons with ids and positions),
 and you act through mouse and keyboard. Nothing you do is simulated: clicks
 reach the real machine.
 
 ## How to work
-- For any task on the remote computer, call **`cua_run_goal`** first. Pass a
-  concrete, observable `goal`, for example "Open the 'Invoices' list in the ERP
-  and open invoice INV-0815". Don't pass a vague one like "do the invoice stuff".
+- If a concrete goal is being given in your former instructions, call 
+  **`cua_run_goal`** and pass that very goal. For example "Open the 'Invoices' list in the ERP and open invoice INV-0815". Don't pass a vague one like "do the invoice stuff".
 - Put application knowledge into `hints`: the menu path, what the target looks
   like, and what to avoid. Example: "Invoices are under Accounting → Invoices",
   "Do not click 'Delete'".
