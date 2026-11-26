@@ -36,6 +36,9 @@ auto-update is turned off so the next upstream JetKVM release does not replace i
 reboots at the end. You only need to deploy again after changing the firmware.
 For a quick test, `npm run deploy:temp` runs a debug build only while the command runs. The
 installed firmware comes back when it ends or the device reboots.
+After changing only the device UI (`ui/`), `npm run deploy:temp:ui` does the same but skips the
+native C build and reuses the last one. The UI is embedded in the app, so the Go app is still
+rebuilt.
 To keep auto-update on, use `npm run deploy:fix -- --keep-auto-update`.
 
 ## Setup

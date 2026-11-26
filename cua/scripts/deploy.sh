@@ -8,7 +8,8 @@
 # With --temp, a debug build runs only while this script runs; the installed
 # firmware is untouched and comes back when the script ends or the device reboots.
 #
-# Usage: npm run deploy:fix | npm run deploy:temp  [-- extra dev_deploy.sh options]
+# Usage: npm run deploy:fix | npm run deploy:temp | npm run deploy:temp:ui  [-- extra dev_deploy.sh options]
+# deploy:temp:ui is deploy:temp with --skip-native-build: for UI-only changes.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

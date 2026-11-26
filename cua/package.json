@@ -5,6 +5,7 @@
   "scripts": {
     "deploy:fix": "scripts/deploy.sh",
     "deploy:temp": "scripts/deploy.sh --temp",
+    "deploy:temp:ui": "scripts/deploy.sh --temp --skip-native-build",
     "cua": "scripts/start.sh"
   }
 }
